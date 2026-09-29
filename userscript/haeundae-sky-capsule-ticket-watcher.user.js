@@ -2,11 +2,18 @@
 // @name         haeundae-sky-capsule-ticket-watcher
 // @namespace    https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher
 // @version      2.1.0
-// @description  訂票頁有票監控（只監看，不下單）。事件驅動、自動退避、Chrome 重啟後自動接續。
-// @match        https://*/ticket_chn/*
+// @description  訂票頁有票監控（只監看，不下單）。開啟訂票頁就自動啟動，Chrome 重開後也會自動接續。
+// @match        https://www.tbluelinepark.com/ticket_chn/GD2100036*
 // @run-at       document-idle
+// @noframes
 // @grant        none
+// @updateURL    none
+// @downloadURL  none
 // ==/UserScript==
+
+// ⚠ 這個檔案由 scripts/build-userscript.js 自動產生，請不要直接改動作邏輯；要改請改 watcher.js 再重新產生。
+// 你可以改的只有下面「設定區」的 month / days（要監看幾月幾號）與上面的 @match（要在哪個網址啟動）。
+// @updateURL / @downloadURL 設為 none：不會自動更新，避免程式被悄悄換掉，也避免你改好的設定被覆蓋。
 /**
  * haeundae-sky-capsule-ticket-watcher v2 — 票務頁面「有票監控」腳本
  * ============================================================================

@@ -15,18 +15,22 @@ anti-bot token and never places orders.
 ## 目錄
 
 1. [它能做什麼／不能做什麼](#它能做什麼不能做什麼)
-2. [快速開始（給完全沒有程式基礎的人）](#快速開始給完全沒有程式基礎的人)
-3. [設定參數](#設定參數)
-4. [畫面說明](#畫面說明)
-5. [運作原理（詳細）](#運作原理詳細)
-6. [自適應間隔與限流](#自適應間隔與限流)
-7. [使用技術](#使用技術)
-8. [End-user 注意事項](#end-user-注意事項)
-9. [常見問題與疑難排解](#常見問題與疑難排解)
-10. [已知限制](#已知限制)
-11. [除錯與內部狀態](#除錯與內部狀態)
-12. [開發歷程與實測結論](#開發歷程與實測結論)
-13. [免責聲明與授權](#免責聲明與授權)
+2. [完整流程總覽（前置作業 → 啟動 → 日常 → 異常處理）](#完整流程總覽前置作業--啟動--日常--異常處理)
+3. [快速開始（貼到 Console，給完全沒有程式基礎的人）](#快速開始給完全沒有程式基礎的人)
+4. [自動啟動：Tampermonkey（Chrome 重開後自動接續）](#自動啟動tampermonkeychrome-重開後自動接續)
+5. [重開 Chrome 小工具（手動執行）](#重開-chrome-小工具手動執行)
+6. [設定參數](#設定參數)
+7. [畫面說明](#畫面說明)
+8. [運作原理（詳細）](#運作原理詳細)
+9. [自適應間隔與限流](#自適應間隔與限流)
+10. [使用技術](#使用技術)
+11. [End-user 注意事項](#end-user-注意事項)
+12. [常見問題與疑難排解](#常見問題與疑難排解)
+13. [已知限制](#已知限制)
+14. [除錯與內部狀態](#除錯與內部狀態)
+15. [開發者：專案結構與測試](#開發者專案結構與測試)
+16. [開發歷程與實測結論](#開發歷程與實測結論)
+17. [免責聲明與授權](#免責聲明與授權)
 
 ---
 
@@ -39,6 +43,35 @@ anti-bot token and never places orders.
 | 記錄「什麼時間、發現哪天哪個時段、剩幾張」（存在瀏覽器） | 繞過網站的防機器人驗證（`X-Schedule-Token`） |
 | 依成功／失敗自動調整查詢頻率，降低被限流的機率 | 在背景常駐（分頁關閉就停止） |
 | （選用）瀏覽器桌面通知 | 保證一定搶得到票 |
+
+---
+
+## 完整流程總覽（前置作業 → 啟動 → 日常 → 異常處理）
+
+整套工具由三個部分組成：
+
+| 部分 | 檔案 | 用途 |
+|---|---|---|
+| 監控主程式 | [`watcher.js`](./watcher.js) | 在訂票頁裡持續查詢、有票就提醒（**必要**） |
+| 自動啟動版（選用） | [`userscript/haeundae-sky-capsule-ticket-watcher.user.js`](./userscript/haeundae-sky-capsule-ticket-watcher.user.js) | 裝進 Tampermonkey 後，每次打開訂票頁就自動啟動，Chrome 重開也不必重貼 |
+| 重開 Chrome 小工具（選用） | [`scripts/restart-chrome.command`](./scripts/restart-chrome.command)（macOS）、[`scripts/restart-chrome.bat`](./scripts/restart-chrome.bat)（Windows，未實測） | 你**手動**執行時，正常關閉所有 Chrome 視窗並重新打開訂票頁 |
+
+**兩種啟動方式，選一個就好：**
+- **方式 A｜貼到 Console**：不用安裝任何東西，3 分鐘搞定；缺點是 Chrome 重開後要重貼。→ [快速開始](#快速開始給完全沒有程式基礎的人)
+- **方式 B｜Tampermonkey 自動啟動**：一次性設定（約 5 分鐘），之後打開訂票頁就自動跑。→ [自動啟動](#自動啟動tampermonkeychrome-重開後自動接續)
+
+**整體流程：**
+
+| 階段 | 你要做什麼 | 詳細說明 |
+|---|---|---|
+| 0. 前置作業 | 用電腦版 Chrome；電腦接電源、網路穩定；系統允許 Chrome 通知（macOS 關掉「專注模式」）；（方式 B）安裝 Tampermonkey 並開啟「允許使用者指令碼」 | [檢查表](#開始前的檢查表請逐項打勾)、[提醒設定](#提醒設定桌面版-chromemacoswindows)、[Tampermonkey](#自動啟動tampermonkeychrome-重開後自動接續) |
+| 1. 啟動 | 打開訂票頁 →（方式 A）貼上 `watcher.js`；（方式 B）什麼都不用做 | [快速開始](#快速開始給完全沒有程式基礎的人) |
+| 2. 啟動後確認 | 右上角出現黑色面板；**在頁面上點一下**（Chrome 規定要點過才能出聲）；可用 `__ticketWatcher.testAlert()` 測試提醒 | [畫面說明](#畫面說明) |
+| 3. 日常 | 分頁放前景（或獨立視窗）、電腦不睡眠；**有票就立刻到網站下單**（工具不代勞） | [End-user 注意事項](#end-user-注意事項) |
+| 4. 被限流 | 面板出現「被網站限流(429)，暫停到 HH:MM」→ **什麼都不用做**，程式會自動暫停約 26 分鐘後試探並恢復 | [自適應間隔與限流](#自適應間隔與限流) |
+| 5. Chrome 重開／當機 | 方式 B：自動接續；方式 A：重貼一次。需要手動重開時可用[重開 Chrome 小工具](#重開-chrome-小工具手動執行) | 同上 |
+| 6. 停止／收尾 | Console 輸入 `__ticketWatcher.stop()` 或關掉分頁；Tampermonkey 用戶把腳本關閉；要留紀錄先 `__ticketWatcher.exportHistory()` | [除錯與內部狀態](#除錯與內部狀態) |
+| 7. 更新程式 | 方式 A：重新複製 `watcher.js`；方式 B：重新安裝最新的 `.user.js`（**不會自動更新**，避免程式被悄悄換掉） | [Tampermonkey](#自動啟動tampermonkeychrome-重開後自動接續) |
 
 ---
 
@@ -118,8 +151,84 @@ days: '10-13',    // ← ② 你要監看幾號
 1. **打開正確的訂票頁**（程式不能替你決定要監看哪個商品）。
 2. **貼上程式並按 Enter**（瀏覽器規定一定要由人操作）。第一次貼可能要先輸入 `allow pasting`。
 3. **保持這個分頁在前景、電腦有電有網。** 瀏覽器不允許網頁程式阻止「整台電腦關機／合上螢幕睡眠」。
-4. **Chrome 完全關閉重開後，需要重新貼一次**（或改用 Tampermonkey 自動啟動，見下方）。
+4. **Chrome 完全關閉重開後，需要重新貼一次**（或改用下一節的 Tampermonkey 自動啟動）。
 5. **有票後，你要自己下單付款**，工具不會代勞。
+
+---
+
+## 自動啟動：Tampermonkey（Chrome 重開後自動接續）
+
+> 適合：要長時間掛著、Chrome 可能重開或當機的人。設定一次，之後**打開訂票頁就自動開始監控**，不必再貼程式。
+> ⚠ 這一節的流程**還沒有在作者的電腦上實測過**（程式檔本身有測試，但「Tampermonkey 安裝與自動執行」沒有）；
+> 如果某一步和你看到的畫面不同，請退回[方式 A（貼到 Console）](#快速開始給完全沒有程式基礎的人)，並歡迎回報。
+
+**前置作業（各做一次）**
+1. 到 Chrome 線上應用程式商店安裝 **Tampermonkey**（或 Violentmonkey）。
+2. 打開 `chrome://extensions` → 找到 Tampermonkey → 按「**詳細資料**」→ 打開「**允許使用者指令碼**」開關。
+   新版 Chrome（約 138 版起）沒開這個，使用者腳本**完全不會執行**，這是最常見的失敗原因。若你的版本沒有這個開關，改開右上角「開發人員模式」。
+
+**安裝腳本**
+3. 點這個連結：
+   [`haeundae-sky-capsule-ticket-watcher.user.js`](https://raw.githubusercontent.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher/main/userscript/haeundae-sky-capsule-ticket-watcher.user.js)
+   → Tampermonkey 會開一個安裝頁 → 按「**安裝**」。
+   （如果沒有跳出安裝頁：Tampermonkey 圖示 →「新增腳本」→ 全選刪掉預設內容 → 貼上該檔全文 → `⌘S`／`Ctrl+S`。）
+4. **確認要監看的月份與日期**：Tampermonkey 圖示 →「管理面板」→ 點該腳本 → 編輯器裡找到 `month: 10`、`days: '10-13'`，
+   只改數字，存檔（`⌘S`／`Ctrl+S`）。其他設定（例如查詢速度）也是在同一個地方改，見[設定參數](#設定參數)。
+5. 如果你監看的是**別的商品**：同一個編輯器最上面的 `// @match` 那行，把網址改成該商品的訂票頁（結尾保留 `*`）。
+
+**驗證**
+6. 打開（或重新整理）訂票頁。幾秒內右上角應該出現黑色面板。**在頁面上點一下**，提示音與語音才會啟用。
+7. 沒有面板？依序檢查：①「允許使用者指令碼」有沒有開 ② Tampermonkey 圖示上該腳本是否為開啟 ③ `@match` 網址是否和你的分頁網址相符
+   ④ Console 有沒有紅字錯誤。
+
+**日常**
+- Chrome 重開後，**只要再打開訂票頁**（或用[重開 Chrome 小工具](#重開-chrome-小工具手動執行)一次做完），監控就自動啟動。
+- 暫停：Tampermonkey 圖示 → 把該腳本切成關閉；或 Console 輸入 `__ticketWatcher.stop()`。
+- **不會自動更新**（標頭設為 `@updateURL none`／`@downloadURL none`）。原因：避免程式被悄悄換掉、也避免你改好的設定被覆蓋。
+  要更新就重新做第 3 步，再把第 4 步的設定改回來。
+- 這份使用者腳本是由 `watcher.js` **自動產生**的（`npm run build:userscript`），內容一模一樣，只是標頭不同：
+  只在這個商品頁啟動、不在腳本自己建立的隱藏 iframe 裡啟動（`@noframes`）、不自動更新。
+
+> 也可以不裝 Tampermonkey，直接把整份 `watcher.js` 存成使用者腳本；差別只是 `@match` 預設涵蓋所有 `https://*/ticket_chn/*` 頁面，範圍比較大。
+
+---
+
+## 重開 Chrome 小工具（手動執行）
+
+`scripts/` 底下有一支小工具：**正常關閉所有 Chrome 視窗 → 等 Chrome 完全結束 → 重新打開訂票頁**。
+
+| 系統 | 檔案 | 狀態 |
+|---|---|---|
+| macOS | [`scripts/restart-chrome.command`](./scripts/restart-chrome.command) | 語法與內容有自動測試；**「關閉 → 重開」的完整流程沒有在測試中真的執行過**（會關掉正在跑的監控） |
+| Windows | [`scripts/restart-chrome.bat`](./scripts/restart-chrome.bat) | **未在 Windows 實測** |
+
+**怎麼用（macOS）**
+
+在「終端機」進到專案資料夾後執行（把網址換成你的訂票頁；不給網址就用檔案裡的預設）：
+
+```bash
+bash scripts/restart-chrome.command
+```
+
+- 不想開終端機：在 Finder 雙擊 `restart-chrome.command`（下載來的檔案第一次要「右鍵 → 打開」，或先在終端機 `chmod +x scripts/restart-chrome.command`）。
+- 第一次執行時 macOS 會問「終端機想要控制 Google Chrome」，按「好」。
+- Windows：雙擊 `scripts\restart-chrome.bat`，或在命令提示字元執行。
+
+**重開後怎麼恢復監控**
+- 用了 Tampermonkey（方式 B）：什麼都不用做，訂票頁一開就自動啟動。
+- 沒用 Tampermonkey（方式 A）：等訂票頁載入後，重新貼一次 `watcher.js`（[快速開始](#快速開始給完全沒有程式基礎的人)的步驟 1～4）。
+
+**使用前請務必知道**
+1. **只有你手動執行時才會動。** 監控程式不會、也不能呼叫它；本專案**刻意沒有**「被限流就自動重開／自動換身分」這種機制（測試會檢查 `watcher.js` 不含這類呼叫）。
+2. **會關掉所有 Chrome 視窗與分頁**，其他工作請先存好。
+3. **歷史紀錄可能消失**：若你的 Chrome 設定為「關閉時清除網站資料」（作者的環境實測是這樣），監控的歷史與存檔會一起被清掉。
+   重開前先在訂票頁的 Console 執行 `__ticketWatcher.exportHistory()` 下載 CSV。
+4. **它不是「解除限流」的按鈕，也不建議拿來繞過限流。** 被限流時，封鎖約 26～29 分鐘會自己解除，程式會自動等待並恢復。
+   重開 Chrome 在某些環境下可能讓網站當成新的瀏覽階段而提早恢復，但這**不保證有效**，而且如果重開後繼續用會被擋的速度查詢，
+   只會再被擋，甚至可能升級成更長、更大範圍的封鎖，連你自己手動訂票都受影響。重開後請維持原本保守的查詢速度。
+5. 這個工具適合的情境：Chrome 卡住、記憶體過高、擴充功能異常、想要一個乾淨的瀏覽器環境。
+
+---
 
 ## 設定參數
 
@@ -345,9 +454,8 @@ Worker 不受同樣限制。若網站的安全設定不允許 Worker，會自動
 
 想清掉存檔重新開始：`window.__ticketWatcher.resetSaved()`，再重新貼上腳本。
 
-**想讓它在分頁一開就自動啟動？** 檔案最前面已附 `// ==UserScript==` 標頭，
-安裝 Tampermonkey／Violentmonkey 後把整份檔案存成使用者腳本即可
-（`@match` 預設為 `https://*/ticket_chn/*`，請依需要收窄成你的網站）。
+**想讓它在分頁一開就自動啟動？** 請看[自動啟動：Tampermonkey](#自動啟動tampermonkeychrome-重開後自動接續)
+（專案已附好可直接安裝的使用者腳本）。
 > 程式開頭已內建 `if (window.top !== window.self) return;`，只會在最上層視窗執行，
 > 不會在腳本自己建立的隱藏 iframe 裡重複啟動（否則會遞迴失控）。
 
@@ -470,8 +578,9 @@ Worker 不受同樣限制。若網站的安全設定不允許 Worker，會自動
 4. **被擋時每次記錄診斷資訊**：回應標頭名稱、`Retry-After`／`X-RateLimit-*`、內容前 120 字、
    本次執行以來的查詢總數與近 1／10／30 分鐘的數量、距離上次載入頁面幾秒。日後就能用真實數字判斷門檻，而不是猜。
 
-> 我們**沒有**、也不會加入「被擋時自動清 Cookie／換身分來繞過限流」這類功能。那是在規避網站的保護機制，
-> 而且就算有效，也只是掩蓋「送太多了」這個根本問題。
+> 我們**沒有**、也不會加入「被擋時自動清 Cookie／換身分／自動重開瀏覽器來繞過限流」這類功能。那是在規避網站的保護機制，
+> 而且就算有效，也只是掩蓋「送太多了」這個根本問題。`scripts/` 裡的[重開 Chrome 小工具](#重開-chrome-小工具手動執行)
+> 只在你手動執行時才會動，監控程式不會呼叫它（測試會檢查）。
 
 **降低被限流機率的建議**：
 1. 保持預設的 `interval.floor`（30 秒）與 `budget`；不要為了「快一點」把它們調到極限。
@@ -508,7 +617,8 @@ Worker 不受同樣限制。若網站的安全設定不允許 Worker，會自動
 4. **不要繞過網站的防護。** 本專案刻意不偽造 `X-Schedule-Token`；請勿改成繞過防機器人驗證的版本。
 5. **遵守網站服務條款與當地法規。** 僅限**個人自用監看**；請勿用於黃牛、轉售、大量搶票或影響他人購票。
 6. **隱私**：腳本只在你的瀏覽器執行，不會把任何資料傳到第三方。歷史紀錄僅存在你的 `localStorage`。
-7. **從不明來源貼到 Console 的程式碼都有風險**：請先自行閱讀 `watcher.js`（有完整註解），確認無誤再貼上。
+7. **從不明來源貼到 Console、或安裝成使用者腳本的程式碼都有風險**：請先自行閱讀 `watcher.js`（有完整註解），確認無誤再貼上或安裝。
+   使用者腳本會在符合網址的每一次頁面載入時自動執行，所以 `@match` 請保持盡量窄；本專案的 `.user.js` 已關閉自動更新。
 8. **網站改版會失效**：若網站改了按鈕文字（`Next`）、時段文字格式（`입장`／`剩余`）或流程，需要對應修改。
 9. **語系**：目前依賴中文版頁面的文字（`Next`、`剩余`）。其他語系頁面需調整選擇邏輯。
 10. **通知限制**：預設僅標題＋面板；分頁在背景時，請留意分頁標題變化，或開啟 `desktopNotification`。
@@ -519,7 +629,7 @@ Worker 不受同樣限制。若網站的安全設定不允許 Worker，會自動
 
 | 現象 | 可能原因 | 處理 |
 |---|---|---|
-| 面板顯示「失敗: … 無資料（可能被限流）」 | 被限流（429／`요청실패`） | 腳本會自動退避；持續失敗請等 10～30 分鐘，或重啟瀏覽器，並調高 `floor`、縮小 `days`。 |
+| 面板顯示「失敗: … 無資料（可能被限流）」 | 被限流（429／`요청실패`） | 腳本會自動暫停並退避；封鎖約 26～29 分鐘會自己解除。建議降低查詢速度（`rotate.everyMs` 調大）、縮小 `days`。 |
 | 一直讀不到時段 | 月份／日期設錯、該月份尚未開放預訂、網路慢 | 確認 `month`／`days`；把 `waitAfterDayClick` 調大到 4000～5000。 |
 | 面板顯示「被網站限流(429)，暫停到 HH:MM」 | 請求太密，網站限流 | 什麼都不用做，程式會在時間到後自動只送 1 個請求試探並恢復。可考慮調高 `interval.floor`。 |
 | 面板顯示 `🔔 桌面通知：❌ 被封鎖` | Chrome 或系統封鎖了通知 | 見「提醒設定」的兩個步驟。改完設定後約 5 秒內面板會自動更新，不必重新整理。 |
@@ -533,7 +643,9 @@ Worker 不受同樣限制。若網站的安全設定不允許 Worker，會自動
 | 顯示「切不到 X 月」 | 該月份還沒開放預訂，日曆按不到那個月 | 改成已開放的月份，或等開放後再跑。 |
 | 面板沒出現 | 貼到錯誤的分頁／Console 選到 iframe 環境 | 確認在訂票頁的**最上層**（Console 左上角 context 選 `top`）。 |
 | 貼上被拒 | Chrome 防貼上保護 | 先在 Console 輸入 `allow pasting`，再貼。 |
-| 重新整理後監控消失 | 腳本存在頁面記憶體中 | 重新貼上（歷史紀錄會保留）。用 Tampermonkey 可自動執行。 |
+| 重新整理後監控消失 | 腳本存在頁面記憶體中 | 重新貼上（歷史紀錄會保留）。用 [Tampermonkey](#自動啟動tampermonkeychrome-重開後自動接續) 可自動執行。 |
+| 裝了 Tampermonkey，打開訂票頁卻沒有面板 | 沒開「允許使用者指令碼」；腳本被關閉；`@match` 網址不符 | 依[自動啟動](#自動啟動tampermonkeychrome-重開後自動接續)第 7 步逐項檢查。 |
+| 重開 Chrome 後歷史紀錄不見了 | Chrome 設定為關閉時清除網站資料 | 預期行為；重開前先 `__ticketWatcher.exportHistory()` 匯出 CSV。 |
 | 出現 `403` | 有人嘗試直接呼叫 API（缺少 `X-Schedule-Token`） | 不要直接呼叫 API；使用本腳本的 UI 流程。 |
 | 標題沒變、面板沒紅，但你在別處看到有票 | 該時段在兩輪之間才釋出／又被搶走 | 縮短休息時間（注意限流風險）。 |
 
@@ -581,13 +693,26 @@ window.__ticketWatcher.state.blocks     // 過去每波限流持續多久
 ## 開發者：專案結構與測試
 
 ```
-ticket-watcher/
-├─ watcher.js          # 主程式（單一檔案，貼到 Console 即可；含 UserScript 標頭）
-├─ test/core.test.js   # 核心邏輯的單元測試
-├─ package.json        # 只有 npm test 指令，沒有任何依賴
+haeundae-sky-capsule-ticket-watcher/
+├─ watcher.js                 # 主程式（單一檔案，貼到 Console 即可；含 UserScript 標頭）
+├─ userscript/
+│  └─ haeundae-sky-capsule-ticket-watcher.user.js   # 給 Tampermonkey 用的版本（由 watcher.js 自動產生，勿手改）
+├─ scripts/
+│  ├─ build-userscript.js     # 產生上面那個 .user.js：npm run build:userscript
+│  ├─ restart-chrome.command  # 手動重開 Chrome（macOS）
+│  └─ restart-chrome.bat      # 手動重開 Chrome（Windows，未實測）
+├─ test/
+│  ├─ core.test.js            # 核心邏輯的單元測試
+│  ├─ fake-env.js             # 假瀏覽器環境（假 DOM／jQuery／通知／語音／localStorage…）
+│  ├─ integration.test.js     # 用假瀏覽器跑完整流程的情境測試（限流、403、逾時、接續、輪流模式…）
+│  └─ userscript.test.js      # 檢查 .user.js 與 watcher.js 同步、標頭正確、小工具語法
+├─ package.json               # npm test、npm run build:userscript；沒有任何依賴
 ├─ README.md
 └─ LICENSE
 ```
+
+> **改了 `watcher.js` 之後**，請執行 `npm run build:userscript` 重新產生使用者腳本，並把兩個檔案一起 commit；
+> 忘了的話 `npm test` 會失敗（`userscript.test.js` 會比對兩者是否同步）。版本號在 `package.json`，`watcher.js` 標頭的 `@version` 要一致。
 
 - `watcher.js` 分成兩層：**核心邏輯**（`Core`：日期解析、月份計算、HTTP 分類、Retry-After、
   有票判斷、新票比對、自適應間隔控制器…，全是不碰 DOM 的純函式）與**瀏覽器層**（iframe、事件監聽、面板、提醒…）。
@@ -597,9 +722,16 @@ ticket-watcher/
 npm test          # 或： node --test
 ```
 
-目前 21 個測試，涵蓋：日期各種合法／錯誤寫法、月份差計算（含跨年、往前切）、HTTP 狀態分類、
-`Retry-After`（秒數／日期／過期）、有票判斷（字串數字）、新票偵測（持續有票不重複、消失再出現算新增）、
-存檔鍵隔離、間隔控制器（縮短到下限、硬失敗退一級並鎖定、放寬下限、軟失敗、加倍與上限、存檔還原容錯）。
+目前共 114 個測試（`npm test`，約 1 分鐘），分三層：
+
+1. **單元測試**（`core.test.js`，27 個）：日期各種合法／錯誤寫法、月份差計算（含跨年、往前切）、HTTP 狀態分類、
+   `Retry-After`（秒數／日期／過期）、有票判斷（字串數字）、新票偵測（持續有票不重複、消失再出現算新增）、
+   存檔鍵隔離、間隔控制器、查詢預算與平均分散、設定深層合併。
+2. **整合測試**（`integration.test.js`，用 `fake-env.js` 的假瀏覽器把完整的 `watcher.js` 跑一遍）：
+   基本流程、有票提醒、備援讀畫面、自動切月份、限流（429）與封鎖期間試探、403 token 過期、逾時、版面改版、
+   通知權限與語音、多分頁鎖、接續存檔（含封鎖中重貼程式）、查詢預算、輪流模式、數百輪的壓力測試（檢查記憶體／計時器／儲存都有上限）。
+3. **發佈檢查**（`userscript.test.js`）：Tampermonkey 用的 `.user.js` 與 `watcher.js` 同步、標頭正確、
+   重開 Chrome 小工具語法正確、監控程式本體不含「自動重開瀏覽器」之類的呼叫。
 
 > 瀏覽器層（iframe、`ajaxComplete` 旁聽、通知、語音）需要真實頁面，無法在 Node 測。
 > 開發時曾因此抓到一個單元測試不可能發現的 bug：`jqXHR` 是類 Promise 物件，直接 `resolve(xhr)` 會被自動拆開，
