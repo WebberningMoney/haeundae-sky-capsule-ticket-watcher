@@ -1,0 +1,38 @@
+{
+  "name": "haeundae-sky-capsule-ticket-watcher",
+  "version": "2.0.0",
+  "description": "Chrome console script that watches the Haeundae Sky Capsule booking page for released time slots and alerts you. Monitoring only - it never books or pays.",
+  "keywords": [
+    "ticket",
+    "watcher",
+    "monitor",
+    "haeundae",
+    "sky-capsule",
+    "userscript",
+    "chrome",
+    "notification"
+  ],
+  "homepage": "https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher#readme",
+  "bugs": {
+    "url": "https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher.git"
+  },
+  "license": "MIT",
+  "author": "WebberningMoney",
+  "private": false,
+  "main": "watcher.js",
+  "files": [
+    "watcher.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
