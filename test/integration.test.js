@@ -738,3 +738,43 @@ scenario('H3 已有封鎖時間紀錄時，下一次的第一個試探改用「�
   const wait = api.state.nextAt - Date.now();
   assert.ok(wait < 1000, `應改用已知最短封鎖（約 270ms），而不是預設的 5000ms；實際剩 ${wait}ms`);
 });
+
+// ============================================================ S. 長時間壓力測試（有沒有東西越積越多）
+scenario('S1 壓力測試：數百輪，票不斷出現／消失，穿插 429 與逾時 → 記憶體、計時器、儲存都有上限', {}, async (env) => {
+  const rounds = (c) => Math.floor((c.callNo - 1) / 4);
+  env.responder = (c) => {
+    if (c.callNo % 97 === 0) return { status: 429 };
+    if (c.callNo % 53 === 0) return { noEvent: true };
+    const rows = env.makeRows(c.sdDate);
+    if (c.day === 11 && rounds(c) % 2 === 0) rows[3].sdRemainder = 2; // 每隔一輪就出現／消失
+    if (c.day === 12 && rounds(c) % 5 === 0) rows[7].sdRemainder = 1;
+    return { rows };
+  };
+  const api = env.start({
+    month: 10, days: '10-13', maxHistory: 20, reloadEvery: 40,
+    interval: { start: 2, step: 1, floor: 1, max: 6, probeAfterOk: 2 },
+    blockedWaitMs: 15, blockedRetryMs: 5,
+    timing: { ajaxTimeoutMs: 40, readyTimeoutMs: 400, settleStableMs: 5, pollMs: 2, monthTimeoutMs: 100, settleMaxMs: 200, jitter: { min: 0, max: 1 } },
+    budget: { maxCalls: null }, notify: { soundRepeatMs: 20, alertDurationMs: 60 },
+  });
+  const sample = [];
+  const t0 = Date.now();
+  while (api.state.cycle < 400 && Date.now() - t0 < 60_000) {
+    await env.sleep(50);
+    if (api.state.cycle >= 40 && sample.length === 0) sample.push({ cycle: api.state.cycle, intervals: env.intervals.size, iframes: env.iframes().length });
+  }
+  assert.ok(api.state.cycle >= 400, `60 秒內只跑了 ${api.state.cycle} 輪`);
+  const end = { intervals: env.intervals.size, iframes: env.iframes().length };
+  const s = api.state;
+  assert.ok(s.events.length <= 500, `事件記錄 ${s.events.length}`);
+  assert.ok(s.history.length <= 40, `歷史紀錄 ${s.history.length}（上限 maxHistory×2=40）`);
+  assert.ok(s.blocks.length <= 50, `封鎖紀錄 ${s.blocks.length}`);
+  assert.ok(s.alerts.length <= 50, `攔截的 alert ${s.alerts.length}`);
+  assert.ok(s.reqLog.length <= 5000);
+  assert.ok(end.iframes <= 1, `隱藏頁面 ${end.iframes} 個`);
+  assert.ok(end.intervals <= sample[0].intervals + 3, `計時器從 ${sample[0].intervals} 增加到 ${end.intervals}（有洩漏）`);
+  const stored = [...env.storage.values()].reduce((n, v) => n + v.length, 0);
+  assert.ok(stored < 120_000, `localStorage 用量 ${stored} 字元`);
+  assert.ok(s.blocks.length >= 3, '壓力過程中應該真的經歷過多次限流恢復');
+  assert.ok(env.notifications.length > 20, '票反覆出現，應該有多次提醒');
+});

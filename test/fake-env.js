@@ -279,6 +279,7 @@ function createEnv(opts = {}) {
     winListeners: {},
     hidden: false,
     focused: false,
+    intervals: new Set(),
     notifPermission: 'granted', // Notification.permission 回報的值
     permQuery: 'granted', // navigator.permissions.query 回報的值（實際狀態）
     audioInitial: 'running',
@@ -375,7 +376,10 @@ function createEnv(opts = {}) {
       log: (...a) => env.consoleLogs.push(a.join(' ')),
       error: (...a) => env.consoleErrors.push(a.join(' ')),
     },
-    setTimeout, clearTimeout, setInterval, clearInterval,
+    setTimeout, clearTimeout,
+    // 追蹤「還活著的 setInterval」，用來偵測計時器有沒有越積越多
+    setInterval: (fn, ms) => { const id = setInterval(fn, ms); env.intervals.add(id); return id; },
+    clearInterval: (id) => { env.intervals.delete(id); clearInterval(id); },
     addEventListener: (t, h) => { (env.winListeners[t] = env.winListeners[t] || []).push(h); },
     removeEventListener: (t, h) => { env.winListeners[t] = (env.winListeners[t] || []).filter((x) => x !== h); },
     focus() {},

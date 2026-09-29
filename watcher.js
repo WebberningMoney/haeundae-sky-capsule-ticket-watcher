@@ -1038,6 +1038,7 @@
     const now = Date.now();
     state.reqTotal++;
     state.reqLog.push(now);
+    if (state.reqLog.length > 5000) state.reqLog.splice(0, state.reqLog.length - 5000); // 安全上限，避免異常情況下無限增長
     while (state.reqLog.length && now - state.reqLog[0] > BUDGET_KEEP_MS()) state.reqLog.shift();
   }
   function requestStats() {
@@ -1153,6 +1154,7 @@
     state.previousKeys = keys;
     for (const a of added) {
       state.history.push({ t: res.startedAt, day: a.day, name: a.name, remain: a.remain });
+      if (state.history.length > CONFIG.maxHistory * 2) state.history.splice(0, state.history.length - CONFIG.maxHistory); // 記憶體中也要設上限（存檔只留最後 maxHistory 筆）
       log(`★新增有票 ${a.day} ${shortSlot(a.name)} 剩${a.remain}`);
     }
     try { localStorage.setItem(KEY.hist, JSON.stringify(state.history.slice(-CONFIG.maxHistory))); } catch (_) {}
@@ -1202,6 +1204,7 @@
         if (state.blockStart) {
           const minutes = Math.round((Date.now() - state.blockStart) / 6000) / 10;
           state.blocks.push({ from: state.blockStart, to: Date.now(), minutes, probes: state.blockProbes, stats: requestStats() });
+          if (state.blocks.length > 50) state.blocks.splice(0, state.blocks.length - 50);
           state.blockProbes = 0;
           log(`✅ 已恢復：這波限流從第一次 429 起約 ${minutes} 分鐘（期間試探 ${state.blocks[state.blocks.length - 1].probes} 次，沒有重開瀏覽器）`);
           state.blockStart = 0;
