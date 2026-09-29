@@ -477,11 +477,26 @@ scenario('D6 設定錯誤：用中文說明原因，並且不送任何請求', {
   assert.equal(env.pageLoads, 0);
 });
 
-scenario('D7 貼在錯誤的頁面（找不到日曆）：中文提示', {}, async (env) => {
+scenario('D7 貼在錯誤的頁面（找不到日曆）：等一下仍找不到才出中文提示，且不會載入頁面', {}, async (env) => {
   env.mainPage.calendar.children = [];
   env.start({ month: 10, days: '10-13' });
-  assert.match(env.panel(), /找不到日曆/);
+  assert.match(env.api().state.phase, /等待頁面載入完成/, '先耐心等日曆，不是馬上判定失敗');
+  await env.until(() => /找不到日曆/.test(env.panel()), 3000, '逾時後出提示');
+  assert.match(env.panel(), /無法啟動/);
   assert.equal(env.pageLoads, 0);
+});
+
+scenario('D7b 日曆晚一點才出現（Tampermonkey／AdGuard 等使用者腳本比網頁早執行）：要等它，不能誤報「找不到日曆」', {}, async (env) => {
+  const kids = env.mainPage.calendar.children;
+  env.mainPage.calendar.children = []; // 腳本執行當下日曆還沒被網頁畫出來
+  const api = env.start({ month: 10, days: '10-13', timing: { startupWaitMs: 2000 } });
+  assert.doesNotMatch(env.panel(), /無法啟動/);
+  await env.sleep(150);
+  assert.doesNotMatch(env.panel(), /無法啟動/, '日曆還沒出現的這段時間不能報錯');
+  env.mainPage.calendar.children = kids; // 網頁的程式把日曆畫出來了
+  await env.until(() => api.state.cycle >= 2, 5000, '日曆出現後正常開始監控');
+  assert.doesNotMatch(env.panel(), /無法啟動|找不到日曆/);
+  assert.ok(api.log().some((l) => /啟動：/.test(l)));
 });
 
 scenario('D8 匯出有票歷史（CSV）', {}, async (env) => {

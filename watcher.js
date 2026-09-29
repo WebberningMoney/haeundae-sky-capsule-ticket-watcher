@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         haeundae-sky-capsule-ticket-watcher
 // @namespace    https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher
-// @version      2.1.0
+// @version      2.1.1
 // @description  訂票頁有票監控（只監看，不下單）。事件驅動、自動退避、Chrome 重啟後自動接續。
 // @match        https://*/ticket_chn/*
 // @run-at       document-idle
@@ -378,6 +378,7 @@
 
     /** 等待時間上限（毫秒）。網路慢可以調大。 */
     timing: {
+      startupWaitMs: 30_000, // 腳本啟動時，最多等多久讓日曆出現（使用者腳本常比網頁早執行）；逾時才判定「不是訂票頁」
       readyTimeoutMs: 20_000, // 頁面載入並出現日曆
       ajaxTimeoutMs: 12_000, // 點日期後等待該次回應
       monthTimeoutMs: 8_000, // 按 Next／Prev 後等待月份真的換掉
@@ -1466,32 +1467,45 @@
   };
 
   // ---- 啟動前自動檢查（preflight）：把常見錯誤變成看得懂的中文提示 ----
+  const NO_CALENDAR = '這個頁面找不到日曆。請先在瀏覽器打開「訂票頁」（要看得到日曆和「預訂日期」），停在那一頁再貼上程式。';
+  /** 只檢查「設定」（不必等網頁）：日期、月份寫得對不對。 */
   function preflight() {
     if (parsedDays.error) return `日期設定有問題：${parsedDays.error}`;
     if (!Number.isInteger(MONTH) || MONTH < 1 || MONTH > 12) return '月份 month 必須是 1 到 12 的數字';
-    if (!findLink(document, 'Next')) {
-      return '這個頁面找不到日曆。請先在瀏覽器打開「訂票頁」（要看得到日曆和「預訂日期」），停在那一頁再貼上程式。';
-    }
-    return acquireLock();
+    return null;
   }
 
-  const problem = preflight();
-  if (problem) {
+  function showStartupProblem(problem) {
     panel.textContent = `⚠️ 無法啟動\n${problem}`;
     panel.style.background = '#b00020';
     panel.style.pointerEvents = 'auto';
     panel.onclick = () => panel.remove();
     console.error('[ticket-watcher] 無法啟動：', problem);
     cleanup(false);
-    return;
   }
 
-  keepAwake();
-  log(`啟動：${state.label}，` +
-    (CONFIG.rotate.enabled ? `輪流模式：每 ${CONFIG.rotate.everyMs / 1000}s 查 1 天` : `休息起始 ${CONFIG.interval.start / 1000}s，下限 ${CONFIG.interval.floor / 1000}s`) +
-    `，${sleeper.mode}，重新載入頻率每 ${CONFIG.reloadEvery} 輪`);
-  log(Alerter.tips());
-  setTimeout(() => log(`語音：${Alerter.voiceName()}`), 1500);
-  if (resumeNote) log(resumeNote);
-  mainLoop();
+  async function startUp() {
+    let problem = preflight();
+    if (!problem && !findLink(document, 'Next')) {
+      // 貼在 Console 時網頁早就載入完了；但用 Tampermonkey／AdGuard 這類「使用者腳本」時，
+      // 腳本常常在日曆被網頁自己的程式畫出來「之前」就開始執行，所以要耐心等，逾時才判定不是訂票頁。
+      state.phase = '等待頁面載入完成…';
+      const t0 = Date.now();
+      while (isAlive() && !findLink(document, 'Next') && Date.now() - t0 < CONFIG.timing.startupWaitMs) await sleep(250);
+      if (!isAlive()) return;
+      if (!findLink(document, 'Next')) problem = NO_CALENDAR;
+    }
+    if (!problem) problem = acquireLock();
+    if (problem) { showStartupProblem(problem); return; }
+
+    keepAwake();
+    log(`啟動：${state.label}，` +
+      (CONFIG.rotate.enabled ? `輪流模式：每 ${CONFIG.rotate.everyMs / 1000}s 查 1 天` : `休息起始 ${CONFIG.interval.start / 1000}s，下限 ${CONFIG.interval.floor / 1000}s`) +
+      `，${sleeper.mode}，重新載入頻率每 ${CONFIG.reloadEvery} 輪`);
+    log(Alerter.tips());
+    setTimeout(() => log(`語音：${Alerter.voiceName()}`), 1500);
+    if (resumeNote) log(resumeNote);
+    mainLoop();
+  }
+  startUp();
 })();

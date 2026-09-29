@@ -28,7 +28,7 @@ const FAST = {
   reloadEvery: 5,
   resume: { cooldownMs: 100 },
   timing: {
-    readyTimeoutMs: 600, ajaxTimeoutMs: 300, monthTimeoutMs: 300, settleMaxMs: 600,
+    startupWaitMs: 300, readyTimeoutMs: 600, ajaxTimeoutMs: 300, monthTimeoutMs: 300, settleMaxMs: 600,
     settleStableMs: 15, pollMs: 5, fallbackWaitMs: 30, jitter: { min: 0, max: 1 },
   },
   workerTimers: false,
