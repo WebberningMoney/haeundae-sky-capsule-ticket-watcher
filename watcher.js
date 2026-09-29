@@ -327,12 +327,15 @@
     /**
      * 查詢預算：在最近 windowMs 內，最多送 maxCalls 個「時段查詢」，超過就先等，等舊的查詢「過期」再送。
      * 為什麼要有這個：休息時間只控制「兩輪之間的間隔」，但被限流看的是「一段時間內的總量」。
-     * 預設 30 分鐘 90 個（約每分鐘 3 個），依實測：30 分鐘窗口內累積 129 個查詢時被擋；
-     * 之後以 90 個為上限連續跑了 60 分鐘以上（共 176 個查詢）沒有被擋。被擋時程式會依當下的量自動再調降。
+     * 預設 30 分鐘 60 個（約每分鐘 2 個）。依實測（2026-09-29）：
+     *   - 30 分鐘窗口內累積 129 個查詢時被擋；
+     *   - 改以 90 個為上限，連續跑了 126 分鐘（365 個查詢）沒事，但之後在窗口內只有 87 個時又被擋
+     *     （那是自動重載頁面後的第一個查詢）→ 「90 個一定安全」不成立，所以預設降到 60。
+     * 被擋時程式會依當下的量自動再調降（× learnFactor）。
      * pace: true 表示把查詢「平均分散」在整個視窗裡（每輪至少間隔 視窗×每輪查詢數÷預算），
      * 避免先猛送、用完預算後長時間停擺。maxCalls 設為 null 表示不限制（不建議）。
      */
-    budget: { windowMs: 30 * 60_000, maxCalls: 90, learnFactor: 0.7, min: 30, pace: true },
+    budget: { windowMs: 30 * 60_000, maxCalls: 60, learnFactor: 0.7, min: 30, pace: true },
 
     /** 啟動後先等多久才開始第一輪（毫秒）。剛被限流時可設大一點（例如 240000）。 */
     initialDelay: 0,
@@ -342,10 +345,13 @@
      * 網站每次點日期本來就會向伺服器查詢，所以不必每輪重新載入也拿得到最新資料；
      * 網站發的 token 有效 10 分鐘，過期時頁面會自己換新的。
      * 實測：每輪整頁重載會多出約 5 個請求（頁面、challenge、issueToken、月份清單…），
-     * 是被限流（429）的主要推手，所以預設改成每 30 輪才重載一次。設 1 = 每輪都重載。
+     * 是被限流（429）的主要推手，所以預設改成很久才重載一次。設 1 = 每輪都重載。
+     * 2026-09-29 的觀察：連續跑 126 分鐘後，第一次「在預算內」被擋，剛好是重載頁面後的第一個查詢
+     * （若與重載無關，剛好落在這個位置的機率不到 1%），所以預設從 30 輪放寬到 120 輪
+     * （4 天／預算 60 ＝ 每 2 分鐘一輪 → 約 4 小時才重載一次）。每次重載都會記進事件記錄，方便日後對照。
      * 頁面出現異常（逾時、版面錯亂…）後，下一輪一定會重新載入。
      */
-    reloadEvery: 30,
+    reloadEvery: 120,
 
     /**
      * 被限流（HTTP 429）後的暫停策略。
@@ -524,7 +530,9 @@
     budgetNoticeAt: 0,
     blockProbes: 0, // 這一波限流期間，已經試探了幾次
     blockStart: 0, // 這一波被限流的開始時間（0 = 目前沒被擋）
-    blocks: [], // 過去每一波限流：{ from, to, minutes }，用來了解實際封鎖多久
+    blocks: [], // 過去每一波限流：{ from, to, minutes, startStats }，用來了解實際封鎖多久、被擋當下的狀況
+    blockStartStats: null, // 這一波「第一次被擋」當下的請求統計（含距離上次載入頁面幾秒），恢復時併入 blocks
+    lastLoadAt: 0, // 最近一次「整頁載入完成」的時間
   };
 
   state.budget = CONFIG.budget.maxCalls;
@@ -543,9 +551,14 @@
     if (!CONFIG.resume.enabled) return;
     try {
       localStorage.setItem(KEY.state, JSON.stringify({
-        savedAt: Date.now(), lastOk, cycle: state.cycle, ...ctl.snapshot(), prev: [...state.previousKeys], blocks: state.blocks.slice(-20), budget: state.budget, calls: state.reqLog.slice(-600), blockStart: state.blockStart, blockProbes: state.blockProbes,
+        savedAt: Date.now(), lastOk, cycle: state.cycle, ...ctl.snapshot(), prev: [...state.previousKeys], blocks: state.blocks.slice(-20), budget: state.budget, calls: state.reqLog.slice(-600), blockStart: state.blockStart, blockProbes: state.blockProbes, bs: state.blockStartStats,
       }));
     } catch (_) {}
+  }
+  /** 第一次被擋後要先暫停多久：有累積的封鎖紀錄就用「已知最短封鎖 × 0.9」，否則用 blockedWaitMs。 */
+  function firstBlockPauseMs() {
+    const known = state.blocks.map((b) => b.minutes * 60_000).filter((ms) => ms > 0);
+    return known.length ? Math.max(CONFIG.blockedRetryMs, Math.min(...known) * 0.9) : CONFIG.blockedWaitMs;
   }
   if (CONFIG.resume.enabled) {
     try {
@@ -555,9 +568,15 @@
         state.cycle = saved.cycle || 0;
         if (Array.isArray(saved.blocks)) state.blocks = saved.blocks;
         // 還原「這一波限流從幾點開始」，重新載入程式後仍能算出這波持續了多久
+        let blockWaitMs = 0;
         if (saved.blockStart && Number.isFinite(saved.blockStart) && saved.blockStart <= Date.now()) {
           state.blockStart = saved.blockStart;
           state.blockProbes = Number(saved.blockProbes) || 0;
+          if (saved.bs && typeof saved.bs === 'object') state.blockStartStats = saved.bs;
+          // 重新貼程式／重開分頁，不能讓我們比「原本排定的試探時間」更早去試探
+          // （否則只冷卻 resume.cooldownMs 就會送出整頁重載＋查詢，等於在封鎖期間亂試）。
+          const planned = state.blockProbes ? saved.savedAt + CONFIG.blockedRetryMs : state.blockStart + firstBlockPauseMs();
+          blockWaitMs = Math.max(0, planned - Date.now());
         }
         // 還原「最近送過哪些查詢」，預算才不會因為重新貼程式／重新整理頁面而歸零
         if (Array.isArray(saved.calls)) state.reqLog = saved.calls.filter((t) => Number.isFinite(t) && Date.now() - t < BUDGET_KEEP_MS() && t <= Date.now());
@@ -567,6 +586,11 @@
           // 中斷過久或上次以失敗收尾 → 先冷卻，等可能存在的限流解除
           CONFIG.initialDelay = Math.max(CONFIG.initialDelay, CONFIG.resume.cooldownMs);
           state.nextAt = Date.now() + CONFIG.initialDelay;
+        }
+        if (blockWaitMs > 0) {
+          CONFIG.initialDelay = Math.max(CONFIG.initialDelay, blockWaitMs);
+          state.nextAt = Date.now() + CONFIG.initialDelay;
+          state.notice = `被網站限流(429)，暫停到 ${new Date(state.nextAt).toLocaleTimeString('zh-TW', { hour12: false })} 再試`;
         }
         // 中斷不久才沿用「已通知過的票」，避免重啟後重複提醒；中斷很久則讓仍存在的票重新提醒一次
         if (gap <= CONFIG.resume.gapMs && Array.isArray(saved.prev)) state.previousKeys = new Set(saved.prev);
@@ -851,16 +875,19 @@
   let lockWarning = '';
   function render() {
     const secs = Math.max(0, Math.round((state.nextAt - Date.now()) / 1000));
+    // 預算節流開啟時，兩輪「開始」之間至少要相隔 paceMs；它比自適應的「休息」長時，實際週期就以它為準。
+    // 面板要如實寫出來，否則會變成「休息 30 秒」卻實際每 80 秒才一輪的矛盾畫面。
+    const paceSec = CONFIG.budget.pace && state.budget ? Math.round(Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget) / 1000) : 0;
     let text =
       `🎫 ${state.label}\n` +
-      `查完休息: ${ctl.interval / 1000} 秒 (下限 ${ctl.lockedFloor / 1000})\n` +
+      `查完休息: ${ctl.interval / 1000} 秒 (下限 ${ctl.lockedFloor / 1000})` +
+      (paceSec * 1000 > ctl.interval ? `，但受預算節流 → 實際每 ${paceSec} 秒才開始一輪` : '') + '\n' +
       `狀態: ${state.phase}\n` +
       `輪數: ${state.cycle}  連續成功: ${ctl.okStreak}  失敗: ${ctl.fails}\n` +
       `下一輪: ${state.running ? '執行中…' : secs + ' 秒'}\n` +
       `上次: ${state.lastResult}\n` +
       Alerter.status();
-    text += `\n📊 查詢預算 ${state.reqLog.filter((t) => Date.now() - t < CONFIG.budget.windowMs).length}/${state.budget || '不限'}（近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘）` +
-      (CONFIG.budget.pace && state.budget ? `，每輪至少間隔 ${Math.round(Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget) / 1000)} 秒` : '');
+    text += `\n📊 查詢預算 ${state.reqLog.filter((t) => Date.now() - t < CONFIG.budget.windowMs).length}/${state.budget || '不限'}（近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘）`;
     if (state.notice) text += `\nℹ️ ${state.notice}`;
     if (lockWarning) text += `\n⚠ ${lockWarning}`;
     if (document.hidden) text += '\n⚠ 分頁在背景，可能變慢，建議放前景或獨立視窗';
@@ -974,7 +1001,7 @@
     if (session && session.frame) session.frame.remove();
     session = null;
   }
-  async function openSession() {
+  async function openSession(reason = '') {
     disposeSession();
     state.phase = '重新載入頁面…';
     const frame = document.createElement('iframe');
@@ -1005,6 +1032,14 @@
     await settle(win, CONFIG.timing.readyTimeoutMs);
     session.win = win;
     session.doc = doc;
+    state.lastLoadAt = Date.now();
+    // 整頁載入會一次送出幾十個請求，是查詢之外最大的一筆流量；記下來，日後被擋時才能對照「是不是剛載入完就被擋」。
+    let resInfo = '';
+    try {
+      const rs = win.performance.getEntriesByType('resource');
+      resInfo = `：${rs.length} 個資源，其中 ${rs.filter((r) => r.transferSize > 0).length} 個實際走網路（其餘來自快取）`;
+    } catch (_) {}
+    log(`🔄 載入頁面第 ${state.pageLoads} 次（${reason || '未註明原因'}）${resInfo}`);
   }
 
   /** 依 CONFIG.month／year 自動按 Next／Prev，並等待月份真的換了、請求結束。回傳目前年份。 */
@@ -1058,9 +1093,13 @@
     const now = Date.now();
     const last = (ms) => state.reqLog.filter((t) => now - t <= ms).length;
     return { total: state.reqTotal, last1: last(60_000), last10: last(600_000), lastWindow: last(CONFIG.budget.windowMs), budget: state.budget, pageLoads: state.pageLoads, monthClicks: state.monthClicks,
-      runMin: Math.round((now - state.startedAt) / 6000) / 10 };
+      runMin: Math.round((now - state.startedAt) / 6000) / 10, sinceLoadSec: state.lastLoadAt ? Math.round((now - state.lastLoadAt) / 1000) : null };
   }
-  const statsText = () => { const r = requestStats(); return `本次執行 ${r.runMin} 分鐘：時段查詢共 ${r.total} 次（近 1 分鐘 ${r.last1}、近 10 分鐘 ${r.last10}、近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘 ${r.lastWindow}／預算 ${r.budget || '不限'}），載入頁面 ${r.pageLoads} 次，切換月份 ${r.monthClicks} 次`; };
+  const statsText = () => {
+    const r = requestStats();
+    return `本次執行 ${r.runMin} 分鐘：時段查詢共 ${r.total} 次（近 1 分鐘 ${r.last1}、近 10 分鐘 ${r.last10}、近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘 ${r.lastWindow}／預算 ${r.budget || '不限'}），載入頁面 ${r.pageLoads} 次` +
+      (r.sinceLoadSec === null ? '' : `（距上次載入完成 ${r.sinceLoadSec} 秒）`) + `，切換月份 ${r.monthClicks} 次`;
+  };
 
   /**
    * 點一個日期，並「旁聽」網站自己發出的時段查詢（getDateScheduleList）。
@@ -1133,7 +1172,9 @@
   /** 掃描一輪；成功回傳 { found, seen, skipped, empties, sources }，失敗丟出 ScanError。 */
   async function scanOnce() {
     const startedAt = Date.now();
-    if (!session || state.forceReload || session.uses >= CONFIG.reloadEvery) await openSession();
+    if (!session || state.forceReload || session.uses >= CONFIG.reloadEvery) {
+      await openSession(!session && !state.pageLoads ? '第一次' : state.forceReload ? '上一輪失敗或剛啟動' : `已用滿 ${CONFIG.reloadEvery} 輪`);
+    }
     session.uses++;
     state.forceReload = false;
 
@@ -1217,9 +1258,10 @@
         state.lastKind = '';
         if (state.blockStart) {
           const minutes = Math.round((Date.now() - state.blockStart) / 6000) / 10;
-          state.blocks.push({ from: state.blockStart, to: Date.now(), minutes, probes: state.blockProbes, stats: requestStats() });
+          state.blocks.push({ from: state.blockStart, to: Date.now(), minutes, probes: state.blockProbes, stats: requestStats(), startStats: state.blockStartStats });
           if (state.blocks.length > 50) state.blocks.splice(0, state.blocks.length - 50);
           state.blockProbes = 0;
+          state.blockStartStats = null;
           log(`✅ 已恢復：這波限流從第一次 429 起約 ${minutes} 分鐘（期間試探 ${state.blocks[state.blocks.length - 1].probes} 次，沒有重開瀏覽器）`);
           state.blockStart = 0;
           state.notice = '';
@@ -1277,8 +1319,8 @@
           // 第一次被擋
           state.blockProbes = 0;
           state.blockStart = Date.now();
-          const known = state.blocks.map((b) => b.minutes * 60_000).filter((ms) => ms > 0);
-          pause = known.length ? Math.max(CONFIG.blockedRetryMs, Math.min(...known) * 0.9) : CONFIG.blockedWaitMs;
+          state.blockStartStats = requestStats(); // 被擋當下的快照：窗口內查詢量、距離上次載入頁面幾秒…（日後用來判斷觸發條件）
+          pause = firstBlockPauseMs();
           Alerter.warn('⚠ 監控被網站限流', `預計暫停約 ${Math.round(pause / 60000)} 分鐘後自動重試，期間不會偵測有票。`);
         }
         wait = Math.max(err.retryAfterMs || 0, pause); // 封鎖期間只由封鎖策略決定要等多久（不疊加「連續失敗倍數」）

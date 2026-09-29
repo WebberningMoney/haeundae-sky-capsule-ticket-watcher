@@ -604,7 +604,8 @@ scenario('E2 診斷：限流期間的試探次數與「沒有重開瀏覽器」�
 scenario('E3 面板顯示查詢預算（已用／上限）', {}, async (env) => {
   const api = env.start({ month: 10, days: '10-13' });
   await env.until(() => api.state.cycle >= 2, 5000, '跑 2 輪');
-  await env.until(() => /📊 查詢預算 \d+\/90（近 30 分鐘）/.test(env.panel()), 3000, '面板有預算資訊');
+  // 上限寫多少跟著目前生效的預算走（預設值改過幾次，測試不該綁死某個數字）
+  await env.until(() => new RegExp(`📊 查詢預算 \\d+/${api.state.budget}（近 30 分鐘）`).test(env.panel()), 3000, '面板有預算資訊');
 });
 
 // ============================================================ F. 查詢預算（滾動視窗）
@@ -643,11 +644,11 @@ scenario('F3 預算：maxCalls=null 表示不限制', {}, async (env) => {
 scenario('F4 預算：存檔中學到的較低預算會被沿用；比設定更高的不會被採用', {}, async (env) => {
   const key = stateKey(10, ['10', '11', '12', '13']);
   env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 60 }));
-  let api = env.start({ month: 10, days: '10-13' });
+  let api = env.start({ month: 10, days: '10-13', budget: { maxCalls: 90 } });
   assert.equal(api.state.budget, 60);
   env.stop();
   env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 99999 }));
-  api = env.start({ month: 10, days: '10-13' });
+  api = env.start({ month: 10, days: '10-13', budget: { maxCalls: 90 } });
   assert.equal(api.state.budget, 90, '不能超過設定的上限');
 });
 
@@ -656,7 +657,7 @@ scenario('F5 預算：重新貼程式／重新整理後，最近送過的查詢�
   const now = Date.now();
   const calls = Array.from({ length: 88 }, (_, i) => now - 60_000 + i); // 1 分鐘內已送 88 個（預算 90）
   env.storage.set(key, JSON.stringify({ savedAt: now - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 90, calls }));
-  const api = env.start({ month: 10, days: '10-13' });
+  const api = env.start({ month: 10, days: '10-13', budget: { maxCalls: 90 } });
   await env.sleep(300);
   assert.equal(env.requests.length, 0, '預算幾乎用完，不能馬上再送 4 個');
   assert.match(api.state.phase, /節流等待/);
@@ -704,6 +705,35 @@ scenario('G3 進入限流時，存檔裡會有 blockStart', {}, async (env) => {
   const saved = JSON.parse(env.storage.get(stateKey(10, ['10', '11', '12', '13'])));
   assert.equal(saved.blockStart, api.state.blockStart);
   assert.equal(saved.lastOk, false);
+});
+
+scenario('G4 限流中重新貼程式：等到原本排定的試探時間才試探，不會只冷卻幾分鐘就送出整頁重載＋查詢', {}, async (env) => {
+  const key = stateKey(10, ['10', '11', '12', '13']);
+  const now = Date.now();
+  env.storage.set(key, JSON.stringify({ savedAt: now - 100, lastOk: false, cycle: 5, interval: 200, lockedFloor: 200, stack: [], blockStart: now - 100, blockProbes: 0 }));
+  // FAST 的 resume.cooldownMs 只有 100ms；沒有這個修正時，100ms 後就會送出整頁載入＋查詢
+  const api = env.start({ month: 10, days: '10-13', blockedWaitMs: 800 });
+  assert.equal(api.state.blockStart, now - 100);
+  assert.ok(api.state.nextAt - Date.now() > 500, `應等到原本排定的時間（約 800ms 後），實際 ${api.state.nextAt - Date.now()}ms`);
+  assert.match(api.state.notice, /被網站限流/);
+  await env.sleep(450);
+  assert.equal(env.requests.length, 0, '排定時間之前不可以送任何查詢');
+  assert.equal(api.state.pageLoads, 0, '排定時間之前也不可以載入頁面');
+  await env.until(() => api.state.blocks.length === 1, 4000, '排定時間到了才試探，然後恢復');
+  assert.ok(env.requests.length > 0);
+});
+
+scenario('G5 被擋時記下當下的狀況（窗口內查詢量、距上次載入頁面幾秒），恢復時併入 blocks；每次載入頁面都留下紀錄', {}, async (env) => {
+  env.responder = (c) => (c.callNo === 9 ? { status: 429 } : {});
+  const api = env.start({ month: 10, days: '10-13', blockedWaitMs: 200 });
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  assert.equal(typeof api.state.blockStartStats.sinceLoadSec, 'number');
+  assert.ok(api.state.blockStartStats.lastWindow >= 8);
+  assert.ok(api.log().some((l) => /🔄 載入頁面第 1 次（第一次）/.test(l)), '第一次載入要留下紀錄');
+  assert.match(api.log().find((l) => /診斷\[rate_limit/.test(l)), /距上次載入完成 \d+ 秒/);
+  await env.until(() => api.state.blocks.length === 1, 5000, '恢復');
+  assert.ok(api.state.blocks[0].startStats && api.state.blocks[0].startStats.lastWindow >= 8, '封鎖紀錄要帶著被擋當下的快照');
+  assert.equal(api.state.blockStartStats, null);
 });
 
 scenario('H1 預算只在「第一次被擋」時學習；封鎖中的試探失敗不會再把預算越調越低', {}, async (env) => {
@@ -792,12 +822,12 @@ scenario('F7 預算平均分散：每輪至少間隔 視窗×每輪查詢數÷�
   assert.ok(gaps.length >= 6);
   assert.ok(Math.min(...gaps) >= 450, `相鄰兩輪間隔最小 ${Math.min(...gaps)}ms，應接近 500ms`);
   assert.ok(Math.max(...gaps) <= 1400, `最大間隔 ${Math.max(...gaps)}ms：不該出現長時間停擺`);
-  assert.match(env.panel(), /每輪至少間隔 \d+ 秒/);
+  assert.match(env.panel(), /但受預算節流 → 實際每 \d+ 秒才開始一輪/);
 });
 
 scenario('F8 預算平均分散：關閉 pace 時退回原本行為', {}, async (env) => {
   const api = env.start({ month: 10, days: '10-13', interval: { start: 1, step: 1, floor: 1, max: 5, probeAfterOk: 2 },
     budget: { windowMs: 60_000, maxCalls: 1000, pace: false } });
   await env.until(() => api.state.cycle >= 5, 5000, '5 輪');
-  assert.doesNotMatch(env.panel(), /每輪至少間隔/);
+  assert.doesNotMatch(env.panel(), /預算節流/);
 });
