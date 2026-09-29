@@ -1,6 +1,6 @@
 {
   "name": "haeundae-sky-capsule-ticket-watcher",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Chrome console script that watches the Haeundae Sky Capsule booking page for released time slots and alerts you. Monitoring only - it never books or pays.",
   "keywords": [
     "ticket",

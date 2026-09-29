@@ -906,6 +906,20 @@ scenario('R5 輪流模式：面板如實寫出查詢間隔', {}, async (env) => 
   assert.doesNotMatch(env.panel(), /查完休息/);
 });
 
+scenario('R5b 輪流模式：設定的速度比預算允許的快時，面板要說明「被預算壓慢了」（不然會以為設定沒生效）', {}, async (env) => {
+  const api = env.start(ROT({ rotate: { enabled: true, everyMs: 10_000, jitterMs: 0 }, budget: { windowMs: 30 * 60_000, maxCalls: 60, pace: true } }));
+  await env.until(() => api.state.cycle >= 1, 5000, '1 次');
+  assert.match(env.panel(), /每 30 秒查 1 天/, '實際間隔是預算平均分散的 30 秒');
+  assert.match(env.panel(), /設定是每 10 秒，但受查詢預算 60 個\/30 分鐘限制/);
+});
+
+scenario('R5c 輪流模式：預算夠大時，實際間隔就是設定值，也不會出現「被預算壓慢」的說明', {}, async (env) => {
+  const api = env.start(ROT({ rotate: { enabled: true, everyMs: 20_000, jitterMs: 0 }, budget: { windowMs: 30 * 60_000, maxCalls: 100, pace: true } }));
+  await env.until(() => api.state.cycle >= 1, 5000, '1 次');
+  assert.match(env.panel(), /每 20 秒查 1 天/);
+  assert.doesNotMatch(env.panel(), /受查詢預算/);
+});
+
 scenario('R6 輪流模式：reloadEvery 以「輪」計（每查 1 天只算 1/天數 輪）', {}, async (env) => {
   env.start(ROT({ reloadEvery: 2 })); // 2 輪 × 4 天 ＝ 每 8 個查詢才重載一次
   await env.until(() => env.requests.length >= 10, 8000, '10 個查詢');

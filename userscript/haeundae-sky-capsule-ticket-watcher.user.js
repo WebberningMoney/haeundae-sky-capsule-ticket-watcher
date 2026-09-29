@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         haeundae-sky-capsule-ticket-watcher
 // @namespace    https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher
-// @version      2.1.1
+// @version      2.1.2
 // @description  訂票頁有票監控（只監看，不下單）。開啟訂票頁就自動啟動，Chrome 重開後也會自動接續。
 // @match        https://www.tbluelinepark.com/ticket_chn/GD2100036*
 // @run-at       document-idle
@@ -905,7 +905,11 @@
     const paceSec = CONFIG.budget.pace && state.budget ? Math.round(Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget) / 1000) : 0;
     const tickSec = Math.round(tickSpacingMs() / 1000);
     const restLine = CONFIG.rotate.enabled
-      ? `輪流查詢: 每 ${tickSec} 秒查 1 天（${days.length} 天輪流，每天約 ${tickSec * days.length} 秒查一次）`
+      ? `輪流查詢: 每 ${tickSec} 秒查 1 天（${days.length} 天輪流，每天約 ${tickSec * days.length} 秒查一次）` +
+        // 設定的 everyMs 比預算允許的更快時，實際會被預算壓慢；要如實寫出來，不然會以為設定沒生效
+        (tickSpacingMs() > CONFIG.rotate.everyMs + 500
+          ? `\n（設定是每 ${Math.round(CONFIG.rotate.everyMs / 1000)} 秒，但受查詢預算 ${state.budget} 個/${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘限制；想更快請一併調高 budget.maxCalls）`
+          : '')
       : `查完休息: ${ctl.interval / 1000} 秒 (下限 ${ctl.lockedFloor / 1000})` +
         (paceSec * 1000 > ctl.interval ? `，但受預算節流 → 實際每 ${paceSec} 秒才開始一輪` : '');
     let text =
