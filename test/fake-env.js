@@ -24,6 +24,7 @@ const SOURCE = fs.readFileSync(path.join(__dirname, '..', 'watcher.js'), 'utf8')
 const FAST = {
   interval: { start: 200, step: 100, floor: 100, max: 1000, probeAfterOk: 2 },
   blockedWaitMs: 400,
+  blockedRetryMs: 150,
   reloadEvery: 5,
   resume: { cooldownMs: 100 },
   timing: {

@@ -705,3 +705,36 @@ scenario('G3 進入限流時，存檔裡會有 blockStart', {}, async (env) => {
   assert.equal(saved.blockStart, api.state.blockStart);
   assert.equal(saved.lastOk, false);
 });
+
+scenario('H1 預算只在「第一次被擋」時學習；封鎖中的試探失敗不會再把預算越調越低', {}, async (env) => {
+  env.responder = (c) => (c.callNo >= 9 && c.callNo <= 12 ? { status: 429 } : {});
+  const api = env.start({ month: 10, days: '10-13', budget: { windowMs: 60_000, maxCalls: 100, learnFactor: 0.5, min: 2 } });
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  const learned = api.state.budget;
+  assert.equal(learned, 4);
+  await env.until(() => api.state.blockProbes >= 3, 8000, '至少 3 次試探仍被擋');
+  assert.equal(api.state.budget, learned, '試探失敗不可以再調降預算');
+  await env.until(() => api.state.blocks.length === 1, 8000, '恢復');
+});
+
+scenario('H2 第一次暫停用 blockedWaitMs，之後的試探用 blockedRetryMs（間隔比較短）', {}, async (env) => {
+  env.responder = (c) => (c.callNo >= 9 && c.callNo <= 11 ? { status: 429 } : {});
+  const api = env.start({ month: 10, days: '10-13', blockedWaitMs: 500, blockedRetryMs: 120 });
+  // 等到「已被擋」且程式已經排好下一次時間
+  await env.until(() => api.state.blockStart > 0 && api.state.nextAt > Date.now() && api.state.blockProbes === 0, 5000, '第一次被擋並排定暫停');
+  assert.ok(api.state.nextAt - Date.now() > 350, `第一次暫停應接近 blockedWaitMs(500)，實際 ${api.state.nextAt - Date.now()}ms`);
+  await env.until(() => api.state.blockProbes >= 1 && api.state.nextAt > Date.now(), 5000, '第一次試探仍被擋並排定下一次');
+  assert.ok(api.state.nextAt - Date.now() <= 130, `之後的試探間隔應是 blockedRetryMs(120)，實際 ${api.state.nextAt - Date.now()}ms`);
+});
+
+scenario('H3 已有封鎖時間紀錄時，下一次的第一個試探改用「已知最短封鎖 × 0.9」', {}, async (env) => {
+  const key = stateKey(10, ['10', '11', '12', '13']);
+  const now = Date.now();
+  env.storage.set(key, JSON.stringify({ savedAt: now - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [],
+    blocks: [{ from: now - 600_000, to: now - 300_000, minutes: 0.005, probes: 1 }] })); // 已知一次封鎖 0.005 分鐘 = 300ms
+  env.responder = (c) => (c.callNo === 9 ? { status: 429 } : {});
+  const api = env.start({ month: 10, days: '10-13', blockedWaitMs: 5000, blockedRetryMs: 100, resume: { gapMs: 999999 } });
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  const wait = api.state.nextAt - Date.now();
+  assert.ok(wait < 1000, `應改用已知最短封鎖（約 270ms），而不是預設的 5000ms；實際剩 ${wait}ms`);
+});

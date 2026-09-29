@@ -336,13 +336,17 @@
     reloadEvery: 30,
 
     /**
-     * 被限流（HTTP 429）後至少暫停多久再試（毫秒）。
-     * 注意：9 分鐘是「保守的猜測」，不是實測結論。目前沒有任何一次是「不重開瀏覽器、自己恢復」的紀錄，
-     * 所以不知道封鎖多久會解除，甚至不確定會不會自己解除。程式會在暫停後只送 1 個查詢試探，
-     * 若仍被擋就把暫停時間逐次拉長（最多約 22 分鐘），並把每次試探的結果記錄下來（見 README「限流」）。
-     * 伺服器若有回 Retry-After，則以伺服器的為準。
+     * 被限流（HTTP 429）後的暫停策略。
+     * 實測（2026-09-29）：一次封鎖在第一次 429 之後 25.3 分鐘仍被擋、29.4 分鐘已恢復，沒有重開瀏覽器，
+     * 而且期間送了好幾次試探／對照請求都沒有延長封鎖 → 封鎖大約 26～29 分鐘會自己解除。
+     *  - blockedWaitMs：第一次被擋後，先暫停多久才送第一個試探（預設 25 分鐘）。
+     *    累積到實際的封鎖時間紀錄後，會改用「已知最短封鎖時間 × 0.9」。
+     *  - blockedRetryMs：第一個試探仍被擋時，之後每隔多久再試 1 個請求（預設 2 分鐘）。
+     * 伺服器若有回 Retry-After，則以伺服器的為準（實測沒有回）。
+     * 這只是一次實測的結果，程式會把每波封鎖的實際長度記在 state.blocks 供修正。
      */
-    blockedWaitMs: 9 * 60_000,
+    blockedWaitMs: 25 * 60_000,
+    blockedRetryMs: 2 * 60_000,
 
     /** 等待時間上限（毫秒）。網路慢可以調大。 */
     timing: {
@@ -1228,7 +1232,8 @@
       let wait = ctl.waitMs(err ? err.retryAfterMs : 0);
       // 403 先當作「token 過期」：下一輪重載拿新 token 再試；換了新頁面仍連續 403 才當作真的被擋。
       const blockedForReal = err && err.kind === 'blocked' && ctl.fails >= 2;
-      if (err && err.kind === 'rate_limit' && CONFIG.budget.maxCalls) {
+      if (err && err.kind === 'rate_limit' && CONFIG.budget.maxCalls && !state.blockStart) {
+        // （只在「第一次」被擋時學習；封鎖中的試探失敗時窗口裡本來就沒什麼查詢，學到的數字沒有意義）
         // 依這次被擋時「窗口內已經送了多少查詢」，把預算調降（只降不升）
         const inWindow = state.reqLog.filter((t) => Date.now() - t < CONFIG.budget.windowMs).length;
         const learned = Core.learnBudget(state.budget, inWindow, CONFIG.budget.learnFactor, CONFIG.budget.min);
@@ -1238,17 +1243,22 @@
         }
       }
       if (err && (err.kind === 'rate_limit' || blockedForReal)) {
-        // 被限流：快速重試沒有用（還可能延長封鎖），直接暫停到預期的解除時間之後，只送 1 個請求試探
-        const pause = CONFIG.blockedWaitMs * (1 + Math.min(ctl.fails - 1, 3) * 0.5);
-        wait = Math.max(wait, pause);
+        // 被限流：快速重試沒有用，直接暫停到預期的解除時間附近，之後每隔一小段時間只送 1 個請求試探
+        let pause;
         if (state.blockStart) {
+          // 已經在封鎖中：這是一次「試探仍被擋」
           state.blockProbes++;
           log(`🔍 限流期間第 ${state.blockProbes} 次試探仍被擋（距第一次 429 已 ${Math.round((Date.now() - state.blockStart) / 6000) / 10} 分鐘，沒有重開瀏覽器）`);
+          pause = CONFIG.blockedRetryMs;
         } else {
+          // 第一次被擋
           state.blockProbes = 0;
           state.blockStart = Date.now();
-          Alerter.warn('⚠ 監控被網站限流', `暫停約 ${Math.round(wait / 60000)} 分鐘後自動重試，期間不會偵測有票。`);
+          const known = state.blocks.map((b) => b.minutes * 60_000).filter((ms) => ms > 0);
+          pause = known.length ? Math.max(CONFIG.blockedRetryMs, Math.min(...known) * 0.9) : CONFIG.blockedWaitMs;
+          Alerter.warn('⚠ 監控被網站限流', `預計暫停約 ${Math.round(pause / 60000)} 分鐘後自動重試，期間不會偵測有票。`);
         }
+        wait = Math.max(err.retryAfterMs || 0, pause); // 封鎖期間只由封鎖策略決定要等多久（不疊加「連續失敗倍數」）
         state.notice = `被網站限流(429)，暫停到 ${new Date(Date.now() + wait).toLocaleTimeString('zh-TW', { hour12: false })} 再試`;
         log(`⏸ 被限流，暫停 ${Math.round(wait / 1000)}s 後只送 1 個請求試探`);
       }
