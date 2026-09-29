@@ -831,3 +831,80 @@ scenario('F8 預算平均分散：關閉 pace 時退回原本行為', {}, async 
   await env.until(() => api.state.cycle >= 5, 5000, '5 輪');
   assert.doesNotMatch(env.panel(), /預算節流/);
 });
+
+// ============================================================ R. 輪流模式（溫和模式）：每次只查 1 天
+const ROT = (over = {}) => ({ month: 10, days: '10-13', rotate: { enabled: true, everyMs: 60, jitterMs: 0 }, ...over });
+
+scenario('R1 輪流模式：每次只送 1 個查詢、四天依序輪流，不會一次連送', {}, async (env) => {
+  const api = env.start(ROT());
+  await env.until(() => env.requests.length >= 9, 8000, '至少 9 個查詢');
+  assert.deepEqual(env.requests.slice(0, 9).map((r) => r.day), [10, 11, 12, 13, 10, 11, 12, 13, 10]);
+  // 第一個間隔包含「載入頁面」的時間，不列入比較
+  const gaps = env.requests.slice(2, 9).map((r, i) => r.at - env.requests[i + 1].at);
+  assert.ok(Math.min(...gaps) >= 40, `相鄰兩個查詢至少隔約 60ms，最小 ${Math.min(...gaps)}ms（不該連送）`);
+  assert.match(api.state.lastResult, /10\/1\d \d+筆（4天輪流）, 全售罄/);
+  assert.equal(env.pageLoads, 1, '仍沿用同一頁');
+});
+
+scenario('R2 輪流模式：票只提醒一次；消失後從畫面移除；再出現會再提醒', {}, async (env) => {
+  env.tickets['20261012'] = [{ idx: 4, remain: 3 }];
+  const api = env.start(ROT());
+  await env.until(() => hitNotifications(env).length >= 1, 5000, '第一次提醒');
+  assert.match(hitNotifications(env)[0].body, /10\/12 5班10:30-11:00 剩3/);
+  const n = env.requests.length;
+  await env.until(() => env.requests.length >= n + 8, 5000, '再輪過兩圈');
+  assert.equal(hitNotifications(env).length, 1, '票一直都在；查其他天時它不該消失又重複提醒');
+  assert.deepEqual(Object.keys(api.state.current), ['10/12']);
+  env.tickets = {};
+  await env.until(() => Object.keys(api.state.current).length === 0, 5000, '輪到那一天時發現票消失');
+  env.tickets['20261012'] = [{ idx: 4, remain: 2 }];
+  await env.until(() => hitNotifications(env).length >= 2, 5000, '再出現要再提醒');
+  assert.equal(api.state.history.length, 2);
+});
+
+scenario('R3 輪流模式：間隔取 everyMs 與「預算平均分散」較大者', {}, async (env) => {
+  // everyMs 只有 20ms，但預算 5 個/1 秒 → 平均分散要求每 200ms 才查 1 個
+  env.start(ROT({ rotate: { enabled: true, everyMs: 20, jitterMs: 0 }, budget: { windowMs: 1000, maxCalls: 5, learnFactor: 0.7, min: 2, pace: true } }));
+  await env.until(() => env.requests.length >= 8, 12000, '至少 8 個查詢');
+  const gaps = env.requests.slice(2, 8).map((r, i) => r.at - env.requests[i + 1].at); // 略過含「載入頁面」的第一個間隔
+  assert.ok(Math.min(...gaps) >= 170, `相鄰兩個查詢至少隔約 200ms，最小 ${Math.min(...gaps)}ms`);
+});
+
+scenario('R4 輪流模式：該月沒有的日期（9 月沒有 31 號）會略過，其他天照常查', {}, async (env) => {
+  const api = env.start(ROT({ month: 9, days: '29-31' }));
+  await env.until(() => api.state.cycle >= 6, 8000, '至少 6 次');
+  assert.deepEqual([...new Set(env.requests.map((r) => r.sdDate))].sort(), ['20260929', '20260930']);
+  assert.ok(!/已停止/.test(env.panel()));
+});
+
+scenario('R4b 輪流模式：目標日期一個都找不到 → 連續 3 次後停止並說明', {}, async (env) => {
+  const api = env.start(ROT({ month: 9, days: '31' }));
+  await env.until(() => /已停止/.test(env.panel()), 8000, '停止');
+  assert.match(env.panel(), /版面可能改版/);
+  assert.equal(api.state.attempt, 3);
+});
+
+scenario('R5 輪流模式：面板如實寫出查詢間隔', {}, async (env) => {
+  const api = env.start(ROT({ rotate: { enabled: true, everyMs: 10_000, jitterMs: 0 } }));
+  await env.until(() => api.state.cycle >= 1, 5000, '1 次');
+  assert.match(env.panel(), /輪流查詢: 每 10 秒查 1 天（4 天輪流，每天約 40 秒查一次）/);
+  assert.doesNotMatch(env.panel(), /查完休息/);
+});
+
+scenario('R6 輪流模式：reloadEvery 以「輪」計（每查 1 天只算 1/天數 輪）', {}, async (env) => {
+  env.start(ROT({ reloadEvery: 2 })); // 2 輪 × 4 天 ＝ 每 8 個查詢才重載一次
+  await env.until(() => env.requests.length >= 10, 8000, '10 個查詢');
+  assert.equal(env.pageLoads, 2);
+});
+
+scenario('R7 輪流模式被限流：暫停、只送試探、恢復後繼續輪流，且重試同一天', {}, async (env) => {
+  env.responder = (c) => (c.callNo === 6 ? { status: 429 } : {});
+  const api = env.start(ROT());
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  const blockedDay = env.requests[5].day;
+  await env.until(() => api.state.blocks.length === 1, 5000, '試探後恢復');
+  assert.equal(env.requests[6].day, blockedDay, '被擋的那一天要重查，不能跳過');
+  const after = env.requests.length;
+  await env.until(() => env.requests.length >= after + 4, 5000, '恢復後繼續輪流');
+  assert.equal(api.state.blockStart, 0);
+});

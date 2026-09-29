@@ -337,6 +337,16 @@
      */
     budget: { windowMs: 30 * 60_000, maxCalls: 60, learnFactor: 0.7, min: 30, pace: true },
 
+    /**
+     * 輪流模式（溫和模式，預設開啟）：每次只查「1 天」，把要監看的日期輪流查，
+     * 而不是每輪一次連送全部日期。平均請求量相同，但不會一次突發 N 個請求。
+     *   everyMs  ：每隔多久查 1 天（預設 30 秒 ＝ 每分鐘 2 個）。每一天被檢查的頻率 ＝ everyMs × 天數。
+     *   jitterMs ：每次間隔的隨機抖動（±），避免規律到像機器。
+     * 實際間隔取 everyMs 與「查詢預算平均分散」較大者；被擋後預算會自動調降，間隔也就自動拉長。
+     * 開啟後 reloadEvery 仍以「輪」計算（一輪 ＝ 每個日期各查一次）。enabled: false 則回到「每輪連查全部日期」。
+     */
+    rotate: { enabled: true, everyMs: 30_000, jitterMs: 2_000 },
+
     /** 啟動後先等多久才開始第一輪（毫秒）。剛被限流時可設大一點（例如 240000）。 */
     initialDelay: 0,
 
@@ -533,6 +543,9 @@
     blocks: [], // 過去每一波限流：{ from, to, minutes, startStats }，用來了解實際封鎖多久、被擋當下的狀況
     blockStartStats: null, // 這一波「第一次被擋」當下的請求統計（含距離上次載入頁面幾秒），恢復時併入 blocks
     lastLoadAt: 0, // 最近一次「整頁載入完成」的時間
+    rotIdx: 0, // 輪流模式：下一個要查第幾天
+    perDay: {}, // 輪流模式：各天最近一次的結果 { 日: { at, tickets } }
+    skipSet: new Set(), // 輪流模式：目前確定「該月沒有這一天」的日期
   };
 
   state.budget = CONFIG.budget.maxCalls;
@@ -560,6 +573,10 @@
     const known = state.blocks.map((b) => b.minutes * 60_000).filter((ms) => ms > 0);
     return known.length ? Math.max(CONFIG.blockedRetryMs, Math.min(...known) * 0.9) : CONFIG.blockedWaitMs;
   }
+  /** 一次「掃描」會送出幾個時段請求：輪流模式 1 個，一般模式＝全部天數。預算與平均分散都以它計算。 */
+  const callsPerScan = () => (CONFIG.rotate.enabled ? 1 : days.length);
+  /** 輪流模式下，兩次查詢「開始」之間至少要隔多久（不含抖動）：設定值與預算平均分散取較大者。 */
+  const tickSpacingMs = () => Math.max(CONFIG.rotate.everyMs, CONFIG.budget.pace && state.budget ? Core.paceMs(CONFIG.budget.windowMs, 1, state.budget) : 0);
   if (CONFIG.resume.enabled) {
     try {
       const saved = JSON.parse(localStorage.getItem(KEY.state) || 'null');
@@ -878,13 +895,17 @@
     // 預算節流開啟時，兩輪「開始」之間至少要相隔 paceMs；它比自適應的「休息」長時，實際週期就以它為準。
     // 面板要如實寫出來，否則會變成「休息 30 秒」卻實際每 80 秒才一輪的矛盾畫面。
     const paceSec = CONFIG.budget.pace && state.budget ? Math.round(Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget) / 1000) : 0;
+    const tickSec = Math.round(tickSpacingMs() / 1000);
+    const restLine = CONFIG.rotate.enabled
+      ? `輪流查詢: 每 ${tickSec} 秒查 1 天（${days.length} 天輪流，每天約 ${tickSec * days.length} 秒查一次）`
+      : `查完休息: ${ctl.interval / 1000} 秒 (下限 ${ctl.lockedFloor / 1000})` +
+        (paceSec * 1000 > ctl.interval ? `，但受預算節流 → 實際每 ${paceSec} 秒才開始一輪` : '');
     let text =
       `🎫 ${state.label}\n` +
-      `查完休息: ${ctl.interval / 1000} 秒 (下限 ${ctl.lockedFloor / 1000})` +
-      (paceSec * 1000 > ctl.interval ? `，但受預算節流 → 實際每 ${paceSec} 秒才開始一輪` : '') + '\n' +
+      `${restLine}\n` +
       `狀態: ${state.phase}\n` +
-      `輪數: ${state.cycle}  連續成功: ${ctl.okStreak}  失敗: ${ctl.fails}\n` +
-      `下一輪: ${state.running ? '執行中…' : secs + ' 秒'}\n` +
+      `${CONFIG.rotate.enabled ? '次數' : '輪數'}: ${state.cycle}  連續成功: ${ctl.okStreak}  失敗: ${ctl.fails}\n` +
+      `${CONFIG.rotate.enabled ? '下一次查詢' : '下一輪'}: ${state.running ? '執行中…' : secs + ' 秒'}\n` +
       `上次: ${state.lastResult}\n` +
       Alerter.status();
     text += `\n📊 查詢預算 ${state.reqLog.filter((t) => Date.now() - t < CONFIG.budget.windowMs).length}/${state.budget || '不限'}（近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘）`;
@@ -1169,10 +1190,14 @@
     return { tickets, total: slots.length, source: 'dom' };
   }
 
-  /** 掃描一輪；成功回傳 { found, seen, skipped, empties, sources }，失敗丟出 ScanError。 */
-  async function scanOnce() {
+  /**
+   * 掃描一輪（預設查全部日期；輪流模式一次只傳入 1 天）；
+   * 成功回傳 { found, seen, skipped, empties, sources }，失敗丟出 ScanError。
+   */
+  async function scanOnce(dayList = days) {
     const startedAt = Date.now();
-    if (!session || state.forceReload || session.uses >= CONFIG.reloadEvery) {
+    // reloadEvery 以「輪」計：輪流模式每查 1 天算 1/天數 輪
+    if (!session || state.forceReload || session.uses >= CONFIG.reloadEvery * (CONFIG.rotate.enabled ? days.length : 1)) {
       await openSession(!session && !state.pageLoads ? '第一次' : state.forceReload ? '上一輪失敗或剛啟動' : `已用滿 ${CONFIG.reloadEvery} 輪`);
     }
     session.uses++;
@@ -1184,7 +1209,7 @@
     const empties = [];
     const sources = new Set();
     let seen = 0;
-    for (const d of days) {
+    for (const d of dayList) {
       if (!isAlive()) throw new ScanError('unknown', '已被新版本取代');
       state.phase = `讀取 ${MONTH}/${d}…`;
       const r = await fetchDay(session, d, year);
@@ -1193,10 +1218,30 @@
       seen += r.total;
       sources.add(r.source);
       if (r.tickets.length) found[`${MONTH}/${d}`] = r.tickets;
-      await sleep(rand(CONFIG.timing.jitter.min, CONFIG.timing.jitter.max));
+      if (dayList.length > 1) await sleep(rand(CONFIG.timing.jitter.min, CONFIG.timing.jitter.max)); // 天與天之間隔一小段；只查 1 天時不需要
     }
-    if (skipped.length === days.length) throw new ScanError('layout', '日曆上一個目標日期都找不到（月份不對或網站改版）');
+    // 一般模式：全部日期都找不到才算版面問題（輪流模式改由 scanTick 統計）
+    if (dayList === days && skipped.length === days.length) throw new ScanError('layout', '日曆上一個目標日期都找不到（月份不對或網站改版）');
     return { startedAt, found, seen, skipped, empties, sources: [...sources] };
+  }
+
+  /** 輪流模式：只查「下一天」，再把各天最新的結果合併成完整快照（讓提醒、面板、歷史紀錄的邏輯維持不變）。 */
+  async function scanTick() {
+    const d = days[state.rotIdx % days.length];
+    const res = await scanOnce([d]);
+    state.rotIdx++; // 失敗時（上面會丟出錯誤）不前進，下次繼續查同一天
+    if (res.skipped.length) state.skipSet.add(d); else state.skipSet.delete(d);
+    if (state.skipSet.size === days.length) throw new ScanError('layout', '日曆上一個目標日期都找不到（月份不對或網站改版）');
+    if (res.skipped.length) delete state.perDay[d];
+    else state.perDay[d] = { at: Date.now(), tickets: res.found[`${MONTH}/${d}`] || [] };
+    // 太久沒更新的結果（例如那一天一直查失敗）不再採信，避免面板一直顯示過期的票
+    const staleMs = Math.max(5 * 60_000, tickSpacingMs() * days.length * 3);
+    const found = {};
+    for (const k of days) {
+      const e = state.perDay[k];
+      if (e && Date.now() - e.at <= staleMs && e.tickets.length) found[`${MONTH}/${k}`] = e.tickets;
+    }
+    return { ...res, found, tickDay: d };
   }
 
   // ==========================================================================
@@ -1218,7 +1263,8 @@
     const n = Object.keys(res.found).length;
     const extra = (res.skipped.length ? ` 略過:${res.skipped.join(',')}(該月無此日)` : '') +
       (res.empties.length ? ` 無場次:${res.empties.join(',')}` : '');
-    state.lastResult = `${fmtTime(res.startedAt)} ${days.length - res.skipped.length}天/${res.seen}筆, ` +
+    const scope = res.tickDay ? `${MONTH}/${res.tickDay} ${res.seen}筆（${days.length}天輪流）` : `${days.length - res.skipped.length}天/${res.seen}筆`;
+    state.lastResult = `${fmtTime(res.startedAt)} ${scope}, ` +
       (n ? `${n}天有票!` : '全售罄') + extra;
     state.notice = '';
     log(`結果: ${state.lastResult}  [資料來源:${res.sources.join('+') || '-'}]`);
@@ -1232,7 +1278,7 @@
     while (isAlive()) {
       // 先檢查查詢預算：最近一段時間送得太多，就等舊的查詢「過期」再送，避免自己把自己送進限流
       // （限流期間的「試探」只是為了確認有沒有恢復，不受預算限制；否則預算被調降後試探會被無限期往後推）
-      const bw = state.blockStart ? 0 : Core.budgetWaitMs(state.reqLog, Date.now(), CONFIG.budget.windowMs, state.budget, days.length);
+      const bw = state.blockStart ? 0 : Core.budgetWaitMs(state.reqLog, Date.now(), CONFIG.budget.windowMs, state.budget, callsPerScan());
       if (bw > 0) {
         if (Date.now() - state.budgetNoticeAt > 5 * 60_000) {
           state.budgetNoticeAt = Date.now();
@@ -1250,7 +1296,7 @@
       const roundStartedAt = Date.now();
       let err = null;
       try {
-        const res = await scanOnce();
+        const res = await (CONFIG.rotate.enabled ? scanTick() : scanOnce());
         if (!isAlive()) return;
         applyResult(res);
         state.cycle++;
@@ -1266,7 +1312,8 @@
           state.blockStart = 0;
           state.notice = '';
         }
-        ctl.onSuccess().forEach(log);
+        // 輪流模式不用「休息時間」，就不要一直印「休息縮短」這類容易讓人誤會的訊息
+        ctl.onSuccess().forEach((m) => { if (!CONFIG.rotate.enabled) log(m); });
       } catch (e) {
         err = e instanceof ScanError ? e : new ScanError('unknown', e && e.message ? e.message : String(e));
       }
@@ -1289,7 +1336,14 @@
         }
       }
       let wait = ctl.waitMs(err ? err.retryAfterMs : 0);
-      if (CONFIG.budget.pace) {
+      if (CONFIG.rotate.enabled) {
+        // 輪流模式：成功時不需要「休息」，只要維持固定的查詢間隔（加一點抖動）；失敗仍照退避
+        if (!err) wait = 0;
+        // 至少 1 秒（防止設定成 0 而連續猛送）；但使用者明確把 everyMs 設得更小時尊重設定（測試會用到）
+        const spacing = Math.max(Math.min(1000, CONFIG.rotate.everyMs), tickSpacingMs() + rand(-CONFIG.rotate.jitterMs, CONFIG.rotate.jitterMs));
+        const need = spacing - (Date.now() - roundStartedAt);
+        if (need > wait) wait = need;
+      } else if (CONFIG.budget.pace) {
         // 依預算「平均分散」：兩輪開始之間至少要相隔 spacing（扣掉這一輪已經花掉的時間）
         const spacing = Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget);
         const need = spacing - (Date.now() - roundStartedAt);
@@ -1433,7 +1487,9 @@
   }
 
   keepAwake();
-  log(`啟動：${state.label}，休息起始 ${CONFIG.interval.start / 1000}s，下限 ${CONFIG.interval.floor / 1000}s，${sleeper.mode}，重新載入頻率每 ${CONFIG.reloadEvery} 輪`);
+  log(`啟動：${state.label}，` +
+    (CONFIG.rotate.enabled ? `輪流模式：每 ${CONFIG.rotate.everyMs / 1000}s 查 1 天` : `休息起始 ${CONFIG.interval.start / 1000}s，下限 ${CONFIG.interval.floor / 1000}s`) +
+    `，${sleeper.mode}，重新載入頻率每 ${CONFIG.reloadEvery} 輪`);
   log(Alerter.tips());
   setTimeout(() => log(`語音：${Alerter.voiceName()}`), 1500);
   if (resumeNote) log(resumeNote);

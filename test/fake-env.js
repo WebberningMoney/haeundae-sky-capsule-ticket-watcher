@@ -34,6 +34,7 @@ const FAST = {
   workerTimers: false,
   notify: { soundRepeatMs: 50, alertDurationMs: 400 },
   budget: { pace: false }, // 測試預設關掉「平均分散」（否則預設預算下每輪要等 48 秒）；要測時在情境裡明確打開
+  rotate: { enabled: false }, // 測試預設用「每輪連查全部日期」；輪流模式的情境在 R 系列裡明確打開
 };
 
 const daysInMonth = (y, m) => new Date(y, m, 0).getDate();
