@@ -172,6 +172,16 @@
     }
 
     /**
+     * 依預算算出「每一輪至少要間隔多久」（毫秒）：讓查詢平均分散在整個視窗裡。
+     * 若沒有這個，程式會先用最快的速度把預算一口氣用完，然後長時間停擺等舊查詢過期（實測會有 9 分鐘完全偵測不到票）。
+     * 例：視窗 30 分鐘、預算 90、每輪 4 個查詢 → 每輪至少間隔 80 秒。
+     */
+    function paceMs(windowMs, callsPerRound, limit) {
+      if (!limit || limit <= 0) return 0;
+      return Math.ceil((windowMs * callsPerRound) / limit);
+    }
+
+    /**
      * 被限流時「學習」預算：把這次被擋時窗口內的查詢量打折，當作新的上限（只會調降，不會調升）。
      */
     function learnBudget(currentLimit, callsInWindow, factor, min) {
@@ -274,7 +284,7 @@
 
     return {
       ScanError, isHard, parseDays, monthDiff, ymd, isNumeric, classifyHttp,
-      parseRetryAfter, extractTickets, shortSlot, diffNewTickets, makeScope, deepMerge, budgetWaitMs, learnBudget, IntervalController,
+      parseRetryAfter, extractTickets, shortSlot, diffNewTickets, makeScope, deepMerge, budgetWaitMs, paceMs, learnBudget, IntervalController,
     };
   })();
 
@@ -318,9 +328,10 @@
      * 查詢預算：在最近 windowMs 內，最多送 maxCalls 個「時段查詢」，超過就先等，等舊的查詢「過期」再送。
      * 為什麼要有這個：休息時間只控制「兩輪之間的間隔」，但被限流看的是「一段時間內的總量」。
      * 預設 30 分鐘 150 個是依實際被擋的紀錄抓的保守起點（約每分鐘 5 個），被擋時程式會依當下的量自動調降。
-     * maxCalls 設為 null 表示不限制（不建議）。
+     * pace: true 表示把查詢「平均分散」在整個視窗裡（每輪至少間隔 視窗×每輪查詢數÷預算），
+     * 避免先猛送、用完預算後長時間停擺。maxCalls 設為 null 表示不限制（不建議）。
      */
-    budget: { windowMs: 30 * 60_000, maxCalls: 150, learnFactor: 0.7, min: 30 },
+    budget: { windowMs: 30 * 60_000, maxCalls: 150, learnFactor: 0.7, min: 30, pace: true },
 
     /** 啟動後先等多久才開始第一輪（毫秒）。剛被限流時可設大一點（例如 240000）。 */
     initialDelay: 0,
@@ -847,7 +858,8 @@
       `下一輪: ${state.running ? '執行中…' : secs + ' 秒'}\n` +
       `上次: ${state.lastResult}\n` +
       Alerter.status();
-    text += `\n📊 查詢預算 ${state.reqLog.filter((t) => Date.now() - t < CONFIG.budget.windowMs).length}/${state.budget || '不限'}（近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘）`;
+    text += `\n📊 查詢預算 ${state.reqLog.filter((t) => Date.now() - t < CONFIG.budget.windowMs).length}/${state.budget || '不限'}（近 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘）` +
+      (CONFIG.budget.pace && state.budget ? `，每輪至少間隔 ${Math.round(Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget) / 1000)} 秒` : '');
     if (state.notice) text += `\nℹ️ ${state.notice}`;
     if (lockWarning) text += `\n⚠ ${lockWarning}`;
     if (document.hidden) text += '\n⚠ 分頁在背景，可能變慢，建議放前景或獨立視窗';
@@ -1193,6 +1205,7 @@
       }
       state.running = true;
       state.attempt++;
+      const roundStartedAt = Date.now();
       let err = null;
       try {
         const res = await scanOnce();
@@ -1233,6 +1246,12 @@
         }
       }
       let wait = ctl.waitMs(err ? err.retryAfterMs : 0);
+      if (CONFIG.budget.pace) {
+        // 依預算「平均分散」：兩輪開始之間至少要相隔 spacing（扣掉這一輪已經花掉的時間）
+        const spacing = Core.paceMs(CONFIG.budget.windowMs, days.length, state.budget);
+        const need = spacing - (Date.now() - roundStartedAt);
+        if (need > wait) wait = need;
+      }
       // 403 先當作「token 過期」：下一輪重載拿新 token 再試；換了新頁面仍連續 403 才當作真的被擋。
       const blockedForReal = err && err.kind === 'blocked' && ctl.fails >= 2;
       if (err && err.kind === 'rate_limit' && CONFIG.budget.maxCalls && !state.blockStart) {

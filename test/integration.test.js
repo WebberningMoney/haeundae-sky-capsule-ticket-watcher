@@ -611,7 +611,7 @@ scenario('E3 面板顯示查詢預算（已用／上限）', {}, async (env) => 
 scenario('F1 預算：任何一段視窗內送出的查詢都不超過上限，且輪詢仍持續進行', {}, async (env) => {
   const api = env.start({
     month: 10, days: '10-13', interval: { start: 20, step: 10, floor: 20, max: 200, probeAfterOk: 2 },
-    budget: { windowMs: 400, maxCalls: 8, learnFactor: 0.7, min: 2 },
+    budget: { windowMs: 400, maxCalls: 8, learnFactor: 0.7, min: 2, pace: false }, // 關掉平均分散，單獨測試「硬上限」
   });
   await env.until(() => api.state.cycle >= 4, 8000, '至少 4 輪');
   const phases = new Set();
@@ -777,4 +777,27 @@ scenario('S1 壓力測試：數百輪，票不斷出現／消失，穿插 429 �
   assert.ok(stored < 120_000, `localStorage 用量 ${stored} 字元`);
   assert.ok(s.blocks.length >= 3, '壓力過程中應該真的經歷過多次限流恢復');
   assert.ok(env.notifications.length > 20, '票反覆出現，應該有多次提醒');
+});
+
+scenario('F7 預算平均分散：每輪至少間隔 視窗×每輪查詢數÷預算，不會先猛送再長時間停擺', {}, async (env) => {
+  // 視窗 1000ms、預算 8、每輪 4 個 → 每輪至少間隔 500ms
+  const api = env.start({
+    month: 10, days: '10-13', interval: { start: 1, step: 1, floor: 1, max: 5, probeAfterOk: 2 },
+    budget: { windowMs: 1000, maxCalls: 8, learnFactor: 0.7, min: 2, pace: true },
+  });
+  await env.until(() => api.state.cycle >= 8, 15000, '至少 8 輪');
+  const starts = [];
+  for (let i = 0; i < env.requests.length; i += 4) starts.push(env.requests[i].at);
+  const gaps = starts.slice(1).map((t, i) => t - starts[i]);
+  assert.ok(gaps.length >= 6);
+  assert.ok(Math.min(...gaps) >= 450, `相鄰兩輪間隔最小 ${Math.min(...gaps)}ms，應接近 500ms`);
+  assert.ok(Math.max(...gaps) <= 1400, `最大間隔 ${Math.max(...gaps)}ms：不該出現長時間停擺`);
+  assert.match(env.panel(), /每輪至少間隔 \d+ 秒/);
+});
+
+scenario('F8 預算平均分散：關閉 pace 時退回原本行為', {}, async (env) => {
+  const api = env.start({ month: 10, days: '10-13', interval: { start: 1, step: 1, floor: 1, max: 5, probeAfterOk: 2 },
+    budget: { windowMs: 60_000, maxCalls: 1000, pace: false } });
+  await env.until(() => api.state.cycle >= 5, 5000, '5 輪');
+  assert.doesNotMatch(env.panel(), /每輪至少間隔/);
 });

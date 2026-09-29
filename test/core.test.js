@@ -267,3 +267,12 @@ test('deepMerge: 深層合併、不污染原型、不吃 undefined 來源', () =
   assert.equal(Core.deepMerge(t, undefined), t);
   assert.equal(Core.deepMerge(t, null), t);
 });
+
+test('paceMs: 依預算算出每輪最短間隔，讓查詢平均分散', () => {
+  assert.equal(Core.paceMs(30 * 60_000, 4, 90), 80_000, '30 分鐘 90 個、每輪 4 個 → 80 秒');
+  assert.equal(Core.paceMs(30 * 60_000, 4, 150), 48_000);
+  assert.equal(Core.paceMs(1000, 4, 8), 500);
+  assert.equal(Core.paceMs(1000, 4, null), 0, '沒有預算就不限制');
+  assert.equal(Core.paceMs(1000, 4, 0), 0);
+  assert.equal(Core.paceMs(1000, 1, 3), 334, '無條件進位，寧可稍慢也不超出預算');
+});

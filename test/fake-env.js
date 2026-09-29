@@ -33,6 +33,7 @@ const FAST = {
   },
   workerTimers: false,
   notify: { soundRepeatMs: 50, alertDurationMs: 400 },
+  budget: { pace: false }, // 測試預設關掉「平均分散」（否則預設預算下每輪要等 48 秒）；要測時在情境裡明確打開
 };
 
 const daysInMonth = (y, m) => new Date(y, m, 0).getDate();
