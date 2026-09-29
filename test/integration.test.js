@@ -658,13 +658,33 @@ scenario('F3 預算：maxCalls=null 表示不限制', {}, async (env) => {
 
 scenario('F4 預算：存檔中學到的較低預算會被沿用；比設定更高的不會被採用', {}, async (env) => {
   const key = stateKey(10, ['10', '11', '12', '13']);
-  env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 60 }));
+  env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 60, bl: true }));
   let api = env.start({ month: 10, days: '10-13', budget: { maxCalls: 90 } });
   assert.equal(api.state.budget, 60);
   env.stop();
-  env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 99999 }));
+  env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 99999, bl: true }));
   api = env.start({ month: 10, days: '10-13', budget: { maxCalls: 90 } });
   assert.equal(api.state.budget, 90, '不能超過設定的上限');
+});
+
+scenario('F4b 預算：存檔裡的預算若不是「被擋後學到的」（只是舊的預設值），不可以壓住新的設定', {}, async (env) => {
+  // 真實發生過：把 maxCalls 從 60 改成 100，存檔裡上一次留下的 60 卻把它壓回去，改了沒有效果
+  const key = stateKey(10, ['10', '11', '12', '13']);
+  env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 60 })); // 沒有 bl
+  const api = env.start({ month: 10, days: '10-13', budget: { maxCalls: 100 } });
+  assert.equal(api.state.budget, 100);
+  assert.equal(api.state.budgetLearned, false);
+});
+
+scenario('F4c 預算：被擋後學到的預算會標記並寫入存檔，重新整理後沿用', {}, async (env) => {
+  env.responder = (c) => (c.callNo === 9 ? { status: 429 } : {});
+  const api = env.start({ month: 10, days: '10-13', budget: { windowMs: 60_000, maxCalls: 100, learnFactor: 0.5, min: 2 } });
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  assert.equal(api.state.budgetLearned, true);
+  await env.sleep(30);
+  const saved = JSON.parse(env.storage.get(stateKey(10, ['10', '11', '12', '13'])));
+  assert.equal(saved.bl, true);
+  assert.equal(saved.budget, api.state.budget);
 });
 
 scenario('F5 預算：重新貼程式／重新整理後，最近送過的查詢仍計入預算（不會歸零）', {}, async (env) => {

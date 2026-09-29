@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         haeundae-sky-capsule-ticket-watcher
 // @namespace    https://github.com/WebberningMoney/haeundae-sky-capsule-ticket-watcher
-// @version      2.1.2
+// @version      2.2.0
 // @description  訂票頁有票監控（只監看，不下單）。事件驅動、自動退避、Chrome 重啟後自動接續。
 // @match        https://*/ticket_chn/*
 // @run-at       document-idle
@@ -327,25 +327,26 @@
     /**
      * 查詢預算：在最近 windowMs 內，最多送 maxCalls 個「時段查詢」，超過就先等，等舊的查詢「過期」再送。
      * 為什麼要有這個：休息時間只控制「兩輪之間的間隔」，但被限流看的是「一段時間內的總量」。
-     * 預設 30 分鐘 60 個（約每分鐘 2 個）。依實測（2026-09-29）：
-     *   - 30 分鐘窗口內累積 129 個查詢時被擋；
-     *   - 改以 90 個為上限，連續跑了 126 分鐘（365 個查詢）沒事，但之後在窗口內只有 87 個時又被擋
-     *     （那是自動重載頁面後的第一個查詢）→ 「90 個一定安全」不成立，所以預設降到 60。
-     * 被擋時程式會依當下的量自動再調降（× learnFactor）。
+     * 預設 30 分鐘 100 個（約每分鐘 3 個，對應預設的每 20 秒查 1 天，多留約 10% 餘裕）。依實測（2026-09-29）：
+     *   - 每分鐘約 3 個：連續跑過 126 分鐘沒被擋（之後在窗口內 87 個時被擋過一次）；
+     *   - 每分鐘約 6 個：約 30 分鐘就被擋一次；
+     *   - 30 分鐘窗口內累積 129 個查詢（每分鐘約 7 個）時被擋。
+     *   沒有任何速率被證明安全。被擋時程式會依當下的量自動再調降（× learnFactor）。
+     * 注意：想加快查詢速度，要同時調高這個上限和 rotate.everyMs，否則實際速度會被這個上限壓住。
      * pace: true 表示把查詢「平均分散」在整個視窗裡（每輪至少間隔 視窗×每輪查詢數÷預算），
      * 避免先猛送、用完預算後長時間停擺。maxCalls 設為 null 表示不限制（不建議）。
      */
-    budget: { windowMs: 30 * 60_000, maxCalls: 60, learnFactor: 0.7, min: 30, pace: true },
+    budget: { windowMs: 30 * 60_000, maxCalls: 100, learnFactor: 0.7, min: 30, pace: true },
 
     /**
      * 輪流模式（溫和模式，預設開啟）：每次只查「1 天」，把要監看的日期輪流查，
      * 而不是每輪一次連送全部日期。平均請求量相同，但不會一次突發 N 個請求。
-     *   everyMs  ：每隔多久查 1 天（預設 30 秒 ＝ 每分鐘 2 個）。每一天被檢查的頻率 ＝ everyMs × 天數。
+     *   everyMs  ：每隔多久查 1 天（預設 20 秒 ＝ 每分鐘 3 個）。每一天被檢查的頻率 ＝ everyMs × 天數。
      *   jitterMs ：每次間隔的隨機抖動（±），避免規律到像機器。
      * 實際間隔取 everyMs 與「查詢預算平均分散」較大者；被擋後預算會自動調降，間隔也就自動拉長。
      * 開啟後 reloadEvery 仍以「輪」計算（一輪 ＝ 每個日期各查一次）。enabled: false 則回到「每輪連查全部日期」。
      */
-    rotate: { enabled: true, everyMs: 30_000, jitterMs: 2_000 },
+    rotate: { enabled: true, everyMs: 20_000, jitterMs: 2_000 },
 
     /** 啟動後先等多久才開始第一輪（毫秒）。剛被限流時可設大一點（例如 240000）。 */
     initialDelay: 0,
@@ -357,11 +358,13 @@
      * 實測：每輪整頁重載會多出約 5 個請求（頁面、challenge、issueToken、月份清單…），
      * 是被限流（429）的主要推手，所以預設改成很久才重載一次。設 1 = 每輪都重載。
      * 2026-09-29 的觀察：連續跑 126 分鐘後，第一次「在預算內」被擋，剛好是重載頁面後的第一個查詢
-     * （若與重載無關，剛好落在這個位置的機率不到 1%），所以預設從 30 輪放寬到 120 輪
-     * （4 天／預算 60 ＝ 每 2 分鐘一輪 → 約 4 小時才重載一次）。每次重載都會記進事件記錄，方便日後對照。
+     * （若與重載無關，剛好落在這個位置的機率不到 1%），所以預設放得很寬。
+     * 後來又有一次「距離上次載入頁面 32 分鐘」才被擋，代表重載不是唯一原因，但重載很少也沒有壞處。
+     * 一輪 ＝ 每個日期各查一次；預設 4 天、每 20 秒查 1 天 ＝ 每輪 80 秒，180 輪 ≈ 4 小時才重載一次。
+     * 每次重載都會記進事件記錄，方便日後對照。
      * 頁面出現異常（逾時、版面錯亂…）後，下一輪一定會重新載入。
      */
-    reloadEvery: 120,
+    reloadEvery: 180,
 
     /**
      * 被限流（HTTP 429）後的暫停策略。
@@ -542,6 +545,7 @@
     blockProbes: 0, // 這一波限流期間，已經試探了幾次
     blockStart: 0, // 這一波被限流的開始時間（0 = 目前沒被擋）
     blocks: [], // 過去每一波限流：{ from, to, minutes, startStats }，用來了解實際封鎖多久、被擋當下的狀況
+    budgetLearned: false, // 目前的預算是不是「被擋後自動調降」得來的（是才需要存檔沿用）
     blockStartStats: null, // 這一波「第一次被擋」當下的請求統計（含距離上次載入頁面幾秒），恢復時併入 blocks
     lastLoadAt: 0, // 最近一次「整頁載入完成」的時間
     rotIdx: 0, // 輪流模式：下一個要查第幾天
@@ -565,7 +569,7 @@
     if (!CONFIG.resume.enabled) return;
     try {
       localStorage.setItem(KEY.state, JSON.stringify({
-        savedAt: Date.now(), lastOk, cycle: state.cycle, ...ctl.snapshot(), prev: [...state.previousKeys], blocks: state.blocks.slice(-20), budget: state.budget, calls: state.reqLog.slice(-600), blockStart: state.blockStart, blockProbes: state.blockProbes, bs: state.blockStartStats,
+        savedAt: Date.now(), lastOk, cycle: state.cycle, ...ctl.snapshot(), prev: [...state.previousKeys], blocks: state.blocks.slice(-20), budget: state.budget, calls: state.reqLog.slice(-600), blockStart: state.blockStart, blockProbes: state.blockProbes, bs: state.blockStartStats, bl: state.budgetLearned,
       }));
     } catch (_) {}
   }
@@ -598,7 +602,12 @@
         }
         // 還原「最近送過哪些查詢」，預算才不會因為重新貼程式／重新整理頁面而歸零
         if (Array.isArray(saved.calls)) state.reqLog = saved.calls.filter((t) => Number.isFinite(t) && Date.now() - t < BUDGET_KEEP_MS() && t <= Date.now());
-        if (saved.budget && CONFIG.budget.maxCalls) state.budget = Math.min(Number(saved.budget) || CONFIG.budget.maxCalls, CONFIG.budget.maxCalls);
+        // 只沿用「被擋後學到的較低預算」。設定裡的預設值不沿用，否則改了 maxCalls 之後（或升級後預設值變大），
+        // 存檔裡的舊數字會把新設定壓回去，改了卻沒有效果（真實發生過）。
+        if (saved.bl && saved.budget && CONFIG.budget.maxCalls) {
+          state.budget = Math.min(Number(saved.budget) || CONFIG.budget.maxCalls, CONFIG.budget.maxCalls);
+          state.budgetLearned = true;
+        }
         const gap = Date.now() - saved.savedAt;
         if (gap > CONFIG.resume.gapMs || saved.lastOk === false) {
           // 中斷過久或上次以失敗收尾 → 先冷卻，等可能存在的限流解除
@@ -1364,6 +1373,7 @@
         if (learned !== state.budget) {
           log(`📉 被擋時窗口內已送 ${inWindow} 個查詢 → 查詢預算調降：${state.budget} → ${learned}（每 ${Math.round(CONFIG.budget.windowMs / 60000)} 分鐘）`);
           state.budget = learned;
+          state.budgetLearned = true; // 只有「被擋後學到的」預算才需要存檔沿用；設定裡的預設值不算
         }
       }
       if (err && (err.kind === 'rate_limit' || blockedForReal)) {
