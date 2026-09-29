@@ -604,7 +604,7 @@ scenario('E2 診斷：限流期間的試探次數與「沒有重開瀏覽器」�
 scenario('E3 面板顯示查詢預算（已用／上限）', {}, async (env) => {
   const api = env.start({ month: 10, days: '10-13' });
   await env.until(() => api.state.cycle >= 2, 5000, '跑 2 輪');
-  await env.until(() => /📊 查詢預算 \d+\/150（近 30 分鐘）/.test(env.panel()), 3000, '面板有預算資訊');
+  await env.until(() => /📊 查詢預算 \d+\/90（近 30 分鐘）/.test(env.panel()), 3000, '面板有預算資訊');
 });
 
 // ============================================================ F. 查詢預算（滾動視窗）
@@ -648,14 +648,14 @@ scenario('F4 預算：存檔中學到的較低預算會被沿用；比設定更�
   env.stop();
   env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 99999 }));
   api = env.start({ month: 10, days: '10-13' });
-  assert.equal(api.state.budget, 150, '不能超過設定的上限');
+  assert.equal(api.state.budget, 90, '不能超過設定的上限');
 });
 
 scenario('F5 預算：重新貼程式／重新整理後，最近送過的查詢仍計入預算（不會歸零）', {}, async (env) => {
   const key = stateKey(10, ['10', '11', '12', '13']);
   const now = Date.now();
-  const calls = Array.from({ length: 148 }, (_, i) => now - 60_000 + i); // 1 分鐘內已送 148 個
-  env.storage.set(key, JSON.stringify({ savedAt: now - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 150, calls }));
+  const calls = Array.from({ length: 88 }, (_, i) => now - 60_000 + i); // 1 分鐘內已送 88 個（預算 90）
+  env.storage.set(key, JSON.stringify({ savedAt: now - 100, lastOk: true, cycle: 3, interval: 200, lockedFloor: 100, stack: [], budget: 90, calls }));
   const api = env.start({ month: 10, days: '10-13' });
   await env.sleep(300);
   assert.equal(env.requests.length, 0, '預算幾乎用完，不能馬上再送 4 個');
