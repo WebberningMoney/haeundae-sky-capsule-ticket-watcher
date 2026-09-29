@@ -5,7 +5,10 @@
 # 用法（在「終端機」）：
 #   bash scripts/restart-chrome.command                    # 打開下面預設的網址
 #   bash scripts/restart-chrome.command "https://…/ticket_chn/GDxxxxxxx"   # 指定網址
-# 也可以在 Finder 雙擊（下載來的檔案第一次可能要「右鍵 → 打開」，或先 chmod +x）。
+# 也可以在 Finder 雙擊。但單獨下載或下載 ZIP 會遺失「可執行」權限，雙擊會出現
+#   "could not be executed because you do not have appropriate access privileges"
+# 這時請先執行一次：  chmod +x 這個檔案的路徑     （或一律用上面的 bash 指令，就不受影響）
+# 若跳出「無法驗證開發者」，改用「右鍵 → 打開」。
 #
 # 它只做一件事：正常關閉所有 Chrome 視窗 → 等 Chrome 完全結束 → 重新打開網址。
 #

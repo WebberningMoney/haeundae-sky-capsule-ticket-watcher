@@ -210,7 +210,12 @@ days: '10-13',    // ← ② 你要監看幾號
 bash scripts/restart-chrome.command
 ```
 
-- 不想開終端機：在 Finder 雙擊 `restart-chrome.command`（下載來的檔案第一次要「右鍵 → 打開」，或先在終端機 `chmod +x scripts/restart-chrome.command`）。
+- 不想開終端機：在 Finder 雙擊 `restart-chrome.command`。**但只有用 `git clone` 取得的檔案才保有「可執行」權限。**
+  如果你是在 GitHub 網頁上單獨下載這個檔案、或下載 ZIP，權限會遺失，雙擊時會跳出：
+  `The file "restart-chrome.command" could not be executed because you do not have appropriate access privileges.`
+  解法：在終端機對該檔案執行一次 `chmod +x`（例如 `chmod +x ~/Downloads/restart-chrome.command`），之後就能雙擊；
+  或一律用上面的 `bash …` 指令執行，就不受權限影響。
+  （若跳出「無法打開，因為無法驗證開發者」，改用「右鍵 → 打開」。）
 - 第一次執行時 macOS 會問「終端機想要控制 Google Chrome」，按「好」。
 - Windows：雙擊 `scripts\restart-chrome.bat`，或在命令提示字元執行。
 
@@ -645,6 +650,7 @@ Worker 不受同樣限制。若網站的安全設定不允許 Worker，會自動
 | 貼上被拒 | Chrome 防貼上保護 | 先在 Console 輸入 `allow pasting`，再貼。 |
 | 重新整理後監控消失 | 腳本存在頁面記憶體中 | 重新貼上（歷史紀錄會保留）。用 [Tampermonkey](#自動啟動tampermonkeychrome-重開後自動接續) 可自動執行。 |
 | 裝了 Tampermonkey，打開訂票頁卻沒有面板 | 沒開「允許使用者指令碼」；腳本被關閉；`@match` 網址不符 | 依[自動啟動](#自動啟動tampermonkeychrome-重開後自動接續)第 7 步逐項檢查。 |
+| 雙擊 `restart-chrome.command` 出現「could not be executed because you do not have appropriate access privileges」 | 單獨下載或下載 ZIP 會遺失檔案的「可執行」權限 | 終端機執行 `chmod +x <檔案路徑>` 後再雙擊；或改用 `bash <檔案路徑>` 執行。 |
 | 重開 Chrome 後歷史紀錄不見了 | Chrome 設定為關閉時清除網站資料 | 預期行為；重開前先 `__ticketWatcher.exportHistory()` 匯出 CSV。 |
 | 出現 `403` | 有人嘗試直接呼叫 API（缺少 `X-Schedule-Token`） | 不要直接呼叫 API；使用本腳本的 UI 流程。 |
 | 標題沒變、面板沒紅，但你在別處看到有票 | 該時段在兩輪之間才釋出／又被搶走 | 縮短休息時間（注意限流風險）。 |
@@ -722,7 +728,7 @@ haeundae-sky-capsule-ticket-watcher/
 npm test          # 或： node --test
 ```
 
-目前共 114 個測試（`npm test`，約 1 分鐘），分三層：
+目前共 115 個測試（`npm test`，約 1 分鐘），分三層：
 
 1. **單元測試**（`core.test.js`，27 個）：日期各種合法／錯誤寫法、月份差計算（含跨年、往前切）、HTTP 狀態分類、
    `Retry-After`（秒數／日期／過期）、有票判斷（字串數字）、新票偵測（持續有票不重複、消失再出現算新增）、
@@ -731,7 +737,7 @@ npm test          # 或： node --test
    基本流程、有票提醒、備援讀畫面、自動切月份、限流（429）與封鎖期間試探、403 token 過期、逾時、版面改版、
    通知權限與語音、多分頁鎖、接續存檔（含封鎖中重貼程式）、查詢預算、輪流模式、數百輪的壓力測試（檢查記憶體／計時器／儲存都有上限）。
 3. **發佈檢查**（`userscript.test.js`）：Tampermonkey 用的 `.user.js` 與 `watcher.js` 同步、標頭正確、
-   重開 Chrome 小工具語法正確、監控程式本體不含「自動重開瀏覽器」之類的呼叫。
+   重開 Chrome 小工具語法正確且在 git 裡記錄為可執行、監控程式本體不含「自動重開瀏覽器」之類的呼叫。
 
 > 瀏覽器層（iframe、`ajaxComplete` 旁聽、通知、語音）需要真實頁面，無法在 Node 測。
 > 開發時曾因此抓到一個單元測試不可能發現的 bug：`jqXHR` 是類 Promise 物件，直接 `resolve(xhr)` 會被自動拆開，

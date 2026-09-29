@@ -61,6 +61,12 @@ test('重開 Chrome 小工具（macOS）：bash 語法正確、有執行權限�
   assert.doesNotMatch(text, /rm\s+-rf|killall|kill\s+-9|pkill|Cookies|defaults\s+delete/);
 });
 
+test('重開 Chrome 小工具在 git 裡要記錄為可執行（100755），否則 clone 下來雙擊會出現「沒有權限」', { skip: process.platform === 'win32' }, (t) => {
+  const r = spawnSync('git', ['ls-files', '-s', 'scripts/restart-chrome.command'], { cwd: ROOT, encoding: 'utf8' });
+  if (r.error || r.status !== 0 || !r.stdout.trim()) return t.skip('不在 git 倉庫裡（例如從 ZIP 解開），略過');
+  assert.match(r.stdout, /^100755 /, `git 記錄的權限不是可執行：${r.stdout.trim()}`);
+});
+
 test('監控程式本體不會呼叫重開 Chrome 的工具（刻意不做「被限流就自動重開」）', () => {
   const src = fs.readFileSync(path.join(ROOT, 'watcher.js'), 'utf8');
   assert.doesNotMatch(src, /restart-chrome|osascript|taskkill|child_process/);
