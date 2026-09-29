@@ -527,7 +527,7 @@
     if (!CONFIG.resume.enabled) return;
     try {
       localStorage.setItem(KEY.state, JSON.stringify({
-        savedAt: Date.now(), lastOk, cycle: state.cycle, ...ctl.snapshot(), prev: [...state.previousKeys], blocks: state.blocks.slice(-20), budget: state.budget, calls: state.reqLog.slice(-600),
+        savedAt: Date.now(), lastOk, cycle: state.cycle, ...ctl.snapshot(), prev: [...state.previousKeys], blocks: state.blocks.slice(-20), budget: state.budget, calls: state.reqLog.slice(-600), blockStart: state.blockStart, blockProbes: state.blockProbes,
       }));
     } catch (_) {}
   }
@@ -538,6 +538,11 @@
         ctl.restore(saved);
         state.cycle = saved.cycle || 0;
         if (Array.isArray(saved.blocks)) state.blocks = saved.blocks;
+        // 還原「這一波限流從幾點開始」，重新載入程式後仍能算出這波持續了多久
+        if (saved.blockStart && Number.isFinite(saved.blockStart) && saved.blockStart <= Date.now()) {
+          state.blockStart = saved.blockStart;
+          state.blockProbes = Number(saved.blockProbes) || 0;
+        }
         // 還原「最近送過哪些查詢」，預算才不會因為重新貼程式／重新整理頁面而歸零
         if (Array.isArray(saved.calls)) state.reqLog = saved.calls.filter((t) => Number.isFinite(t) && Date.now() - t < BUDGET_KEEP_MS() && t <= Date.now());
         if (saved.budget && CONFIG.budget.maxCalls) state.budget = Math.min(Number(saved.budget) || CONFIG.budget.maxCalls, CONFIG.budget.maxCalls);
@@ -1166,7 +1171,8 @@
     }
     while (isAlive()) {
       // 先檢查查詢預算：最近一段時間送得太多，就等舊的查詢「過期」再送，避免自己把自己送進限流
-      const bw = Core.budgetWaitMs(state.reqLog, Date.now(), CONFIG.budget.windowMs, state.budget, days.length);
+      // （限流期間的「試探」只是為了確認有沒有恢復，不受預算限制；否則預算被調降後試探會被無限期往後推）
+      const bw = state.blockStart ? 0 : Core.budgetWaitMs(state.reqLog, Date.now(), CONFIG.budget.windowMs, state.budget, days.length);
       if (bw > 0) {
         if (Date.now() - state.budgetNoticeAt > 5 * 60_000) {
           state.budgetNoticeAt = Date.now();
@@ -1219,8 +1225,6 @@
           return;
         }
       }
-      saveState(!err);
-
       let wait = ctl.waitMs(err ? err.retryAfterMs : 0);
       // 403 先當作「token 過期」：下一輪重載拿新 token 再試；換了新頁面仍連續 403 才當作真的被擋。
       const blockedForReal = err && err.kind === 'blocked' && ctl.fails >= 2;
@@ -1248,6 +1252,7 @@
         state.notice = `被網站限流(429)，暫停到 ${new Date(Date.now() + wait).toLocaleTimeString('zh-TW', { hour12: false })} 再試`;
         log(`⏸ 被限流，暫停 ${Math.round(wait / 1000)}s 後只送 1 個請求試探`);
       }
+      saveState(!err); // 放在這裡，才會把剛設定好的 blockStart 一起存起來
       state.running = false;
       state.phase = '等待下一輪';
       state.nextAt = Date.now() + wait;

@@ -671,3 +671,37 @@ scenario('F6 預算：過期或不合理的舊紀錄不會被還原', {}, async 
   const api = env.start({ month: 10, days: '10-13' });
   assert.equal(api.state.reqLog.length, 1, '只留下合理的那一筆');
 });
+
+// ============================================================ G. 限流期間的試探
+scenario('G1 限流期間的試探不受「查詢預算」限制（真實發生過：預算被調降後試探被無限期往後推）', {}, async (env) => {
+  env.responder = (c) => (c.callNo === 9 ? { status: 429 } : {});
+  // learnFactor 極小 → 預算被調到 2，但窗口內已有 9 個查詢，遠超過預算
+  const api = env.start({ month: 10, days: '10-13', blockedWaitMs: 150, budget: { windowMs: 60_000, maxCalls: 100, learnFactor: 0.01, min: 2 } });
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  assert.equal(api.state.budget, 2);
+  await env.until(() => api.state.blocks.length === 1, 3000, '試探沒有被預算擋住，很快就恢復');
+  assert.ok(api.log().some((l) => /已恢復/.test(l)));
+});
+
+scenario('G2 「這波限流從幾點開始」會隨存檔保存；重新載入後恢復時仍能算出持續多久', {}, async (env) => {
+  const key = stateKey(10, ['10', '11', '12', '13']);
+  const start = Date.now() - 4000;
+  env.storage.set(key, JSON.stringify({ savedAt: Date.now() - 100, lastOk: false, cycle: 5, interval: 200, lockedFloor: 200, stack: [], blockStart: start, blockProbes: 1 }));
+  const api = env.start({ month: 10, days: '10-13' });
+  assert.equal(api.state.blockStart, start);
+  assert.equal(api.state.blockProbes, 1);
+  await env.until(() => api.state.blocks.length === 1, 5000, '恢復');
+  const b = api.state.blocks[0];
+  assert.ok(b.minutes >= 0.05, `持續時間要從原本的起點算：${b.minutes} 分鐘`);
+  assert.equal(b.probes, 1);
+});
+
+scenario('G3 進入限流時，存檔裡會有 blockStart', {}, async (env) => {
+  env.responder = (c) => (c.callNo === 9 ? { status: 429 } : {});
+  const api = env.start({ month: 10, days: '10-13', blockedWaitMs: 2000 });
+  await env.until(() => api.state.blockStart > 0, 5000, '被擋');
+  await env.sleep(30);
+  const saved = JSON.parse(env.storage.get(stateKey(10, ['10', '11', '12', '13'])));
+  assert.equal(saved.blockStart, api.state.blockStart);
+  assert.equal(saved.lastOk, false);
+});
